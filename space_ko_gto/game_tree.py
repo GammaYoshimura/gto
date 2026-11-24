@@ -81,8 +81,10 @@ def _raise_target(state: BettingState, name: str) -> float:
     actor = state.actor
     active_others = [p for p in state.active if p != actor]
     last_aggressor = state.last_aggressor
-    contestable = [p for p in active_others if p not in state.all_in]
-    effective = min([state.stacks_rem[actor]] + [state.stacks_rem[p] for p in contestable])
+    # The commitment threshold is measured against the raiser's own remaining
+    # stack, as specified for this sizing abstraction. Short opponents must
+    # not turn a deep player's ordinary open into a jam.
+    effective = state.stacks_rem[actor]
     if name == "OPEN_RAISE":
         target = OPEN_RAISE_SIZE["BTN" if actor == 0 else "SB"]
     elif name == "ISO_RAISE":

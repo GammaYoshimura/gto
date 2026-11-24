@@ -21,7 +21,7 @@ space-ko-batch --equity equity_1326x1326.npy --stack-buckets 2 3 4 --token-profi
 
 El generador de equidad reutiliza cada board aleatorio para todas las manos compatibles (10.000 boards por defecto, unas 6.600 observaciones por pareja válida). `eval7` se instala como dependencia opcional. Los pares que comparten cartas quedan a cero y la matriz es simétrica por construcción. El solver guarda las medias y su estado de ejecución cada 100 iteraciones; usa `--resume` para continuar un checkpoint con la misma configuración. `--payoff-to-bb` convierte los valores KO expresados en unidades de premio a la escala bb del solver; el valor por defecto `1.0` requiere una calibración externa. `TorchPreflopEQRLeafEvaluator` puede ejecutar su kernel en CUDA. El recorrido MCCFR sigue en CPU; `--nashconv-samples 100` calcula una estimación costosa de NashConv por muestreo, con error estadístico y las aproximaciones de los pagos terminales.
 
-`space-ko-batch` recorre la rejilla seleccionada secuencialmente; limita cada ejecución con `--limit` y continúa estados interrumpidos con `--resume`.
+`space-ko-batch` recorre la rejilla seleccionada secuencialmente; limita cada ejecución con `--limit` y continúa estados interrumpidos con `--resume`. Los estados fallidos se marcan `FAILED` y su causa queda en `state_errors`.
 
 ## Contratos
 

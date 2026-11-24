@@ -21,6 +21,7 @@ def verify_database(db_path: str, tolerance: float = 0.01) -> list[str]:
             queue = db.execute("SELECT state_id,status FROM states_queue").fetchall()
             checkpoints = db.execute("SELECT state_id,iteration,payload FROM solver_checkpoints").fetchall()
             metrics = db.execute("SELECT state_id,iteration,metric_json FROM solver_metrics").fetchall()
+            errors = db.execute("SELECT state_id,error_text FROM state_errors").fetchall()
     except sqlite3.Error as exc:
         return [f"SQLite schema or read error: {exc}"]
 
@@ -59,6 +60,12 @@ def verify_database(db_path: str, tolerance: float = 0.01) -> list[str]:
             issues.append(f"{state_id}: unknown queue status {status!r}")
         if status == "DONE" and node_counts.get(state_id, 0) == 0:
             issues.append(f"{state_id}: marked DONE with no exported nodes")
+    statuses = dict(queue)
+    for state_id, error_text in errors:
+        if statuses.get(state_id) != "FAILED":
+            issues.append(f"{state_id}: stored error without FAILED status")
+        if not error_text:
+            issues.append(f"{state_id}: empty stored error")
 
     for state_id, iteration, payload in checkpoints:
         label = f"{state_id}@{iteration}"

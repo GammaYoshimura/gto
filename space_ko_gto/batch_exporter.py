@@ -38,6 +38,12 @@ CREATE TABLE IF NOT EXISTS solver_metrics (
     PRIMARY KEY (state_id, iteration),
     FOREIGN KEY (state_id) REFERENCES states_queue(state_id)
 );
+CREATE TABLE IF NOT EXISTS state_errors (
+    state_id TEXT PRIMARY KEY,
+    error_text TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (state_id) REFERENCES states_queue(state_id)
+);
 """
 
 
@@ -87,6 +93,8 @@ class BatchExporter:
         with self._connect() as db:
             db.execute("INSERT OR IGNORE INTO states_queue(state_id) VALUES (?)", (state_id,))
             db.execute("UPDATE states_queue SET status=? WHERE state_id=?", (status, state_id))
+            if status != "FAILED":
+                db.execute("DELETE FROM state_errors WHERE state_id=?", (state_id,))
 
     def save_checkpoint(self, state_id: str, iteration: int, payload: bytes) -> None:
         with self._connect() as db:
@@ -104,6 +112,12 @@ class BatchExporter:
             db.execute("INSERT OR IGNORE INTO states_queue(state_id) VALUES (?)", (state_id,))
             db.execute("INSERT OR REPLACE INTO solver_metrics(state_id,iteration,metric_json) VALUES (?,?,?)",
                        (state_id, int(iteration), json.dumps(metrics, sort_keys=True)))
+
+    def save_error(self, state_id: str, error_text: str) -> None:
+        with self._connect() as db:
+            db.execute("INSERT OR IGNORE INTO states_queue(state_id) VALUES (?)", (state_id,))
+            db.execute("INSERT OR REPLACE INTO state_errors(state_id,error_text) VALUES (?,?)",
+                       (state_id, error_text[:4000]))
 
     def list_states(self, status: str | None = None) -> list[tuple[str, str]]:
         with self._connect() as db:

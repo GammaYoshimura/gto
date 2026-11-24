@@ -17,6 +17,7 @@ def run_batch(equity_path: Path, db_path: Path, stack_buckets, token_profiles,
     configurations = product(product(stack_buckets, repeat=3), token_profiles, prize_structures)
     completed = 0
     skipped = 0
+    failed = 0
     selected = 0
     done_states = {state_id for state_id, status in BatchExporter(db_path).list_states("DONE")}
     for stacks, token_name, prize_name in configurations:
@@ -28,22 +29,32 @@ def run_batch(equity_path: Path, db_path: Path, stack_buckets, token_profiles,
         if resume and state_id in done_states:
             skipped += 1
             continue
-        state_id, _ = run(
-            equity_path=equity_path,
-            db_path=db_path,
-            stacks=stacks,
-            tokens=TOKEN_PROFILES[token_name],
-            payouts=PRIZE_STRUCTURES[prize_name],
-            iterations=iterations,
-            checkpoint_every=checkpoint_every,
-            seed=seed,
-            resume=resume,
-            payoff_scale=payoff_scale,
-        )
+        try:
+            state_id, _ = run(
+                equity_path=equity_path,
+                db_path=db_path,
+                stacks=stacks,
+                tokens=TOKEN_PROFILES[token_name],
+                payouts=PRIZE_STRUCTURES[prize_name],
+                iterations=iterations,
+                checkpoint_every=checkpoint_every,
+                seed=seed,
+                resume=resume,
+                payoff_scale=payoff_scale,
+            )
+        except Exception as exc:
+            failed += 1
+            exporter = BatchExporter(db_path)
+            exporter.set_status(state_id, "FAILED")
+            exporter.save_error(state_id, f"{type(exc).__name__}: {exc}")
+            print(f"FAILED {state_id} stacks={stacks}: {type(exc).__name__}: {exc}")
+            continue
         completed += 1
         print(f"[{completed}] {state_id} stacks={stacks} tokens={token_name} prizes={prize_name}")
     if skipped:
         print(f"Skipped {skipped} states already marked DONE")
+    if failed:
+        print(f"Failed {failed} states; inspect state_errors in {db_path}")
     return completed
 
 

@@ -128,6 +128,19 @@ class BatchExporter:
                                   (status,)).fetchall()
         return [(str(state_id), str(state_status)) for state_id, state_status in rows]
 
+    def state_progress(self, status: str | None = None) -> dict[str, tuple[str, int]]:
+        """Return state status and latest checkpoint iteration in one query."""
+        with self._connect() as db:
+            query = ("SELECT q.state_id,q.status,COALESCE(c.iteration,0) "
+                     "FROM states_queue q LEFT JOIN solver_checkpoints c ON q.state_id=c.state_id")
+            params = ()
+            if status is not None:
+                query += " WHERE q.status=?"
+                params = (status,)
+            rows = db.execute(query, params).fetchall()
+        return {str(state_id): (str(state_status), int(iteration))
+                for state_id, state_status, iteration in rows}
+
     def list_node_paths(self, state_id: str) -> list[str]:
         with self._connect() as db:
             rows = db.execute("SELECT node_path FROM nodes WHERE state_id=? ORDER BY node_path",

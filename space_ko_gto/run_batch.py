@@ -34,14 +34,15 @@ def run_batch(equity_path: Path, db_path: Path, stack_buckets, token_profiles,
     skipped = 0
     failed = 0
     selected = 0
-    done_states = {state_id for state_id, status in BatchExporter(db_path).list_states("DONE")}
+    progress = BatchExporter(db_path).state_progress()
     for stacks, token_name, prize_name in configurations:
         if limit is not None and selected >= limit:
             break
         selected += 1
         state_id = state_id_for(stacks, TOKEN_PROFILES[token_name],
                                 PRIZE_STRUCTURES[prize_name], payoff_scale)
-        if resume and state_id in done_states:
+        prior_status, prior_iteration = progress.get(state_id, ("PENDING", 0))
+        if resume and prior_status == "DONE" and prior_iteration >= iterations:
             skipped += 1
             continue
         try:

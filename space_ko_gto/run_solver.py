@@ -15,8 +15,10 @@ from .space_ko_icm import elimination_payoffs
 
 
 def state_id_for(stacks, tokens, payouts, payoff_scale) -> str:
-    payload = json.dumps({"stacks": stacks, "tokens": tokens, "payouts": payouts,
-                          "payoff_to_bb": payoff_scale},
+    payload = json.dumps({"stacks": list(map(float, stacks)),
+                          "tokens": list(map(float, tokens)),
+                          "payouts": list(map(float, payouts)),
+                          "payoff_to_bb": float(payoff_scale)},
                          sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()[:24]
 

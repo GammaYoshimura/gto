@@ -64,17 +64,24 @@ class BatchExporter:
 
     def export_node(self, state_id: str, node_path: str, hero_pos: int,
                     actions: list[str], strategy: np.ndarray, ev: np.ndarray) -> None:
-        strategy = np.asarray(strategy, dtype=np.float16, order="C")
-        ev = np.asarray(ev, dtype=np.float16, order="C")
-        if strategy.ndim != 2 or ev.shape != strategy.shape or strategy.shape[1] != len(actions):
-            raise ValueError("strategy and EV must share shape (1326, number of actions)")
-        if strategy.shape[0] != 1326 or hero_pos not in (0, 1, 2):
-            raise ValueError("expected 1326 combos and hero_pos in {0,1,2}")
+        self.export_nodes(state_id, [(node_path, hero_pos, actions, strategy, ev)])
+
+    def export_nodes(self, state_id: str, nodes) -> None:
+        """Upsert many node rows under one SQLite transaction."""
+        def prepared_rows():
+            for node_path, hero_pos, actions, strategy, ev in nodes:
+                strategy = np.asarray(strategy, dtype=np.float16, order="C")
+                ev = np.asarray(ev, dtype=np.float16, order="C")
+                if strategy.ndim != 2 or ev.shape != strategy.shape or strategy.shape[1] != len(actions):
+                    raise ValueError("strategy and EV must share shape (1326, number of actions)")
+                if strategy.shape[0] != 1326 or hero_pos not in (0, 1, 2):
+                    raise ValueError("expected 1326 combos and hero_pos in {0,1,2}")
+                yield (state_id, node_path, hero_pos, json.dumps(actions),
+                       strategy.tobytes(), ev.tobytes())
+
         with self._connect() as db:
             db.execute("INSERT OR IGNORE INTO states_queue(state_id) VALUES (?)", (state_id,))
-            db.execute("INSERT OR REPLACE INTO nodes VALUES (?, ?, ?, ?, ?, ?)",
-                       (state_id, node_path, hero_pos, json.dumps(actions),
-                        strategy.tobytes(), ev.tobytes()))
+            db.executemany("INSERT OR REPLACE INTO nodes VALUES (?, ?, ?, ?, ?, ?)", prepared_rows())
 
     def set_status(self, state_id: str, status: str) -> None:
         with self._connect() as db:

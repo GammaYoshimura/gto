@@ -250,25 +250,32 @@ class MCCFRSolver:
 
     def export(self, exporter, state_id: str) -> None:
         """Write every visited decision node to a BatchExporter instance."""
-        def visit(node: TreeNode, path: str):
-            yield node, path
-            for action, child in zip(node.actions, node.children):
-                yield from visit(child, f"{path}/{action}")
+        def records():
+            def visit(node: TreeNode, path: str):
+                yield node, path
+                for action, child in zip(node.actions, node.children):
+                    yield from visit(child, f"{path}/{action}")
 
-        for node, path in visit(self.root, "ROOT"):
-            if node.terminal:
-                continue
-            n_actions = len(node.actions)
-            strategy = np.full((1326, n_actions), 1.0 / n_actions, dtype=np.float32)
-            ev = np.zeros_like(strategy)
-            for combo, sums in self.strategy_sums.get(path, {}).items():
-                if sums.sum() > 0:
-                    strategy[combo] = sums / sums.sum()
-                visits = self.row_visits.get(path, {}).get(combo, 0.0)
-                if visits > 0:
-                    ev[combo] = self.ev_sums[path][combo] / visits
-            exporter.export_node(state_id, path, node.state.actor,
-                                 [str(action) for action in node.actions], strategy, ev)
+            for node, path in visit(self.root, "ROOT"):
+                if node.terminal:
+                    continue
+                n_actions = len(node.actions)
+                strategy = np.full((1326, n_actions), 1.0 / n_actions, dtype=np.float32)
+                ev = np.zeros_like(strategy)
+                for combo, sums in self.strategy_sums.get(path, {}).items():
+                    if sums.sum() > 0:
+                        strategy[combo] = sums / sums.sum()
+                    visits = self.row_visits.get(path, {}).get(combo, 0.0)
+                    if visits > 0:
+                        ev[combo] = self.ev_sums[path][combo] / visits
+                yield (path, node.state.actor, [str(action) for action in node.actions], strategy, ev)
+
+        if hasattr(exporter, "export_nodes"):
+            exporter.export_nodes(state_id, records())
+            return
+
+        for path, hero_pos, actions, strategy, ev in records():
+            exporter.export_node(state_id, path, hero_pos, actions, strategy, ev)
 
     def checkpoint(self) -> bytes:
         """Serialize sparse regrets and average strategy for SQLite checkpointing."""

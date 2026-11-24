@@ -55,6 +55,9 @@ def run(equity_path: Path, db_path: Path, stacks, tokens, payouts,
     exporter.set_status(state_id, "RUNNING")
     while solver.iteration < iterations:
         count = min(checkpoint_every, iterations - solver.iteration)
+        if nashconv_samples:
+            next_metric = ((solver.iteration // 200) + 1) * 200
+            count = min(count, next_metric - solver.iteration)
         solver.solve(count)
         exporter.export(solver, state_id)
         exporter.save_checkpoint(state_id, solver.iteration, solver.checkpoint())

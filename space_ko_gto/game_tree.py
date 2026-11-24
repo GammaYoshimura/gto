@@ -80,7 +80,8 @@ def _raise_target(state: BettingState, name: str) -> float:
     active_others = [p for p in state.active if p != actor]
     last_aggressor = next((int(item.split(":")[0]) for item in reversed(state.history)
                            if item.split(":", 1)[1].startswith(("OPEN_RAISE", "ISO_RAISE", "3BET", "SQUEEZE", "4BET"))), None)
-    effective = min([state.stacks_rem[actor]] + [state.stacks_rem[p] for p in active_others])
+    contestable = [p for p in active_others if p not in state.all_in]
+    effective = min([state.stacks_rem[actor]] + [state.stacks_rem[p] for p in contestable])
     if name == "OPEN_RAISE":
         target = OPEN_RAISE_SIZE["BTN" if actor == 0 else "SB"]
     elif name == "ISO_RAISE":
@@ -141,6 +142,9 @@ def legal_action_options(state: BettingState) -> tuple[Action, ...]:
             names = ["FOLD", "CALL", "4BET", "JAM"]
         else:
             names = ["FOLD", "CALL", "JAM"]
+    if not any(p != actor and p not in state.all_in for p in state.active):
+        # A raise into players who cannot respond is not a legal strategic branch.
+        names = [name for name in names if name in ("FOLD", "CALL", "CHECK", "LIMP", "LIMP_BEHIND")]
     result = []
     for name in names:
         if name in ("LIMP", "LIMP_BEHIND", "CALL"):

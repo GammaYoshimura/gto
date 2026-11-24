@@ -113,7 +113,7 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
                 any(p not in range(3) for p in active) or
                 len(combo_ids) != 3 or any(combo < 0 or combo >= 1326 for combo in combo_ids) or
                 any(not self.card_removal[combo_ids[p], combo_ids[q]]
-                    for offset, p in enumerate(active) for q in active[offset + 1:])):
+                    for p in range(3) for q in range(p + 1, 3))):
             raise ValueError("combo_ids must identify a legal three-player deal")
         if (not np.isfinite(bounty).all() or np.any(bounty < 0) or
                 not np.isfinite(invested).all() or np.any(invested < 0) or

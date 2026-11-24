@@ -5,9 +5,11 @@ from __future__ import annotations
 import numpy as np
 import json
 import zlib
+import hashlib
 
 from .constants import CARD_REMOVAL_MASK, COMBO_CARDS
 from .game_tree import TreeNode, build_tree
+from .leaf_evaluator import PreflopEQRLeafEvaluator
 
 
 class DCFR:
@@ -75,6 +77,13 @@ class MCCFRSolver:
         if not np.isfinite(self.equity).all() or not np.isfinite(self.payoffs).all():
             raise ValueError("equity and payoff_matrix must be finite")
         self.root: TreeNode = build_tree(self.stacks, max_nodes=max_nodes)
+        self.leaf_evaluator = PreflopEQRLeafEvaluator(self.equity, CARD_REMOVAL_MASK)
+        self._checkpoint_config = {
+            "solver": "mccfr-v1",
+            "stacks": list(self.stacks),
+            "equity_sha256": hashlib.sha256(self.equity.tobytes()).hexdigest(),
+            "payoff_sha256": hashlib.sha256(self.payoffs.tobytes()).hexdigest(),
+        }
         self.rng = np.random.default_rng(seed)
         # Sparse per-information-set rows avoid allocating every combo at every node.
         self.regrets: dict[str, dict[int, np.ndarray]] = {}
@@ -121,11 +130,22 @@ class MCCFRSolver:
 
     def _terminal_values(self, node: TreeNode, deal: tuple[int, int, int]) -> np.ndarray:
         state = node.state
+        if node.terminal == "PREFLOP_CALL":
+            leaf_ev = self.leaf_evaluator.evaluate_sampled_leaf(
+                active_players=state.active,
+                combo_ids=deal,
+                pot_bb=state.pot_bb,
+                stacks_rem=state.stacks_rem,
+                payoff_matrix=self.payoffs,
+            )
+            result = -np.asarray(state.contributions, dtype=np.float32)
+            for player in state.active:
+                result[player] += leaf_ev[player]
+            return result
         values = -np.asarray(state.contributions, dtype=np.float64)
         awards = np.zeros(3, dtype=np.float64)
         levels = sorted(set(c for c in state.contributions if c > 0))
         previous = 0.0
-        approximate = node.terminal == "PREFLOP_CALL"
         for level in levels:
             contributors = [p for p, contribution in enumerate(state.contributions) if contribution >= level - 1e-9]
             amount = (level - previous) * len(contributors)
@@ -133,19 +153,23 @@ class MCCFRSolver:
             eligible = tuple(p for p in state.active if state.contributions[p] >= level - 1e-9)
             if not eligible or amount <= 0:
                 continue
-            shares = self._showdown_shares(eligible, deal, approximate)
+            shares = self._showdown_shares(eligible, deal, approximate=False)
             for p, share in shares.items():
                 awards[p] += amount * share
         values += awards
-        if node.terminal in ("ALL_IN_SHOWDOWN", "PREFLOP_CALL"):
+        if node.terminal == "ALL_IN_SHOWDOWN":
             # KO value is added only for all-in opponents who can be covered.
+            showdown_shares = self._showdown_shares(tuple(state.active), deal, approximate=False)
             for q in state.all_in:
-                for p in state.active:
-                    if p == q or state.stacks[p] < state.stacks[q]:
-                        continue
-                    pair_eq = float(self.equity[deal[p], deal[q]])
-                    elimination_chance = float(np.clip((1.0 - pair_eq) if p != q else 0.0, 0.0, 1.0))
-                    values[p] += float(self.payoffs[p, q]) * elimination_chance
+                covering = [p for p in state.active if p != q and state.stacks[p] >= state.stacks[q]
+                            and self.payoffs[p, q] > 0]
+                covering_mass = sum(showdown_shares.get(p, 0.0) for p in covering)
+                if not covering or covering_mass <= 0:
+                    continue
+                elimination_chance = float(np.clip(1.0 - showdown_shares.get(q, 0.0), 0.0, 1.0))
+                for p in covering:
+                    share = showdown_shares.get(p, 0.0) / covering_mass
+                    values[p] += float(self.payoffs[p, q]) * elimination_chance * share
         return values.astype(np.float32)
 
     def _visit(self, node: TreeNode, traverser: int, deal: tuple[int, int, int],
@@ -243,6 +267,7 @@ class MCCFRSolver:
             return [[key, combo, values.tolist()]
                     for key, combos in source.items() for combo, values in combos.items()]
         payload = {
+            "config": self._checkpoint_config,
             "iteration": self.iteration,
             "rng": self.rng.bit_generator.state,
             "regrets": rows(self.regrets),
@@ -255,6 +280,8 @@ class MCCFRSolver:
 
     def restore_checkpoint(self, blob: bytes) -> None:
         payload = json.loads(zlib.decompress(blob))
+        if payload.get("config") != self._checkpoint_config:
+            raise ValueError("checkpoint configuration does not match stacks, payoffs, equity, or solver version")
         self.iteration = int(payload["iteration"])
         self.rng.bit_generator.state = payload["rng"]
         for name in ("regrets", "strategy_sums", "ev_sums"):

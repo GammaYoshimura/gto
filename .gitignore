@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.npy
+*.sqlite
+*.sqlite3
+*.db
+equity_1326x1326.npy

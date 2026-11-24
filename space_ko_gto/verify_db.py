@@ -16,10 +16,24 @@ def verify_database(db_path: str, tolerance: float = 0.01) -> list[str]:
     with sqlite3.connect(db_path) as db:
         rows = db.execute("SELECT state_id,node_path,actions_json,strategy_blob,ev_blob FROM nodes").fetchall()
     for state_id, node_path, actions_json, strategy_blob, ev_blob in rows:
-        actions = json.loads(actions_json)
-        shape = (1326, len(actions))
-        strategy, ev = decode_blob(strategy_blob, shape), decode_blob(ev_blob, shape)
         label = f"{state_id}/{node_path}"
+        try:
+            actions = json.loads(actions_json)
+        except (TypeError, json.JSONDecodeError):
+            issues.append(f"{label}: invalid actions_json")
+            continue
+        if not isinstance(actions, list) or not actions or any(not isinstance(action, str) for action in actions):
+            issues.append(f"{label}: actions_json must be a non-empty string list")
+            continue
+        if len(set(actions)) != len(actions):
+            issues.append(f"{label}: duplicate action labels")
+            continue
+        shape = (1326, len(actions))
+        expected_bytes = int(np.prod(shape)) * np.dtype(np.float16).itemsize
+        if len(strategy_blob) != expected_bytes or len(ev_blob) != expected_bytes:
+            issues.append(f"{label}: strategy or EV blob has incorrect byte length")
+            continue
+        strategy, ev = decode_blob(strategy_blob, shape), decode_blob(ev_blob, shape)
         if not np.isfinite(strategy).all() or not np.isfinite(ev).all():
             issues.append(f"{label}: NaN or Inf")
             continue

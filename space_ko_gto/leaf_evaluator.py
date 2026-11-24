@@ -65,6 +65,33 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
             out[p] = ev.astype(np.float32)
         return out
 
+    def evaluate_sampled_leaf(self, active_players, combo_ids, pot_bb, stacks_rem,
+                              payoff_matrix) -> np.ndarray:
+        """Fast EQR evaluation for one already-sampled, non-overlapping deal."""
+        active = tuple(active_players)
+        bounty = np.asarray(payoff_matrix, dtype=np.float32)
+        if len(active) not in (2, 3) or bounty.shape != (3, 3):
+            raise ValueError("two or three active players and a (3,3) payoff matrix are required")
+        out = np.zeros(3, dtype=np.float32)
+        for p in active:
+            opponents = [q for q in active if q != p]
+            pair_values = [float(self.equity[combo_ids[p], combo_ids[q]])
+                           if self.card_removal[combo_ids[p], combo_ids[q]] else 0.0
+                           for q in opponents]
+            if len(pair_values) == 1:
+                equity = pair_values[0]
+            else:
+                equity = 1.0 / sum(1.0 / max(value, 1e-5) for value in pair_values)
+            role = "MULTIWAY_3WAY" if len(active) == 3 else "IP_CALLER"
+            ev = float(pot_bb) * float(np.clip(equity * EQR[role], 0.0, 1.0))
+            spr = max((float(stacks_rem[q]) for q in opponents), default=0.0) / max(float(pot_bb), self.epsilon)
+            stackoff = float(np.clip(1.0 / (1.0 + spr), 0.0, 1.0))
+            for q in opponents:
+                if stacks_rem[p] >= stacks_rem[q]:
+                    ev += float(bounty[p, q]) * stackoff / len(opponents)
+            out[p] = ev
+        return out
+
 
 class TorchPreflopEQRLeafEvaluator(BaseLeafEvaluator):
     """PyTorch implementation of the EQR matrix kernel.

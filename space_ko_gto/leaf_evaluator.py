@@ -63,6 +63,7 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
         else:
             scores, normalizer = {}, None
         for p in active:
+            opponents = [q for q in active if q != p]
             equity = (pair_equities[p][0] if len(active) == 2
                       else scores[p] / normalizer)
             role = "MULTIWAY_3WAY" if len(active) == 3 else "IP_CALLER"
@@ -95,6 +96,7 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
             scores = {p: float(np.prod(pair_equities[p])) for p in active}
             normalizer = sum(scores.values()) or self.epsilon
         for p in active:
+            opponents = [q for q in active if q != p]
             equity = (pair_equities[p][0] if len(active) == 2
                       else scores[p] / normalizer)
             role = "MULTIWAY_3WAY" if len(active) == 3 else "IP_CALLER"

@@ -78,6 +78,10 @@ class MCCFRSolver:
             raise ValueError("equity must be (1326,1326) and payoff_matrix (3,3)")
         if not np.isfinite(self.equity).all() or not np.isfinite(self.payoffs).all():
             raise ValueError("equity and payoff_matrix must be finite")
+        if np.any(self.equity < 0.0) or np.any(self.equity > 1.0):
+            raise ValueError("equity values must lie in [0,1]")
+        if not np.allclose(self.equity + self.equity.T, CARD_REMOVAL_MASK, atol=1e-3):
+            raise ValueError("equity matrix must be complementary and zero for card collisions")
         self.root: TreeNode = build_tree(self.stacks, max_nodes=max_nodes)
         self.leaf_evaluator = PreflopEQRLeafEvaluator(self.equity, CARD_REMOVAL_MASK)
         self._checkpoint_config = {

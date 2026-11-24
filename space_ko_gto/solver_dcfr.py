@@ -625,7 +625,9 @@ class VectorDCFRSolver:
             raise ValueError("payoff_scale must be finite and non-negative")
         self.chip_ev_mode = np.array_equal(self.payouts, np.asarray((1.0, 0.0, 0.0)))
         self.initial_icm = icm_equities(self.stacks, self.payouts)
-        equity = np.asarray(equity, dtype=np.float32)
+        # ``run_solver`` memory-maps the read-only equity file; own a writable
+        # buffer before handing it to PyTorch to avoid undefined tensor writes.
+        equity = np.array(equity, dtype=np.float32, copy=True)
         payoffs = np.asarray(payoff_matrix, dtype=np.float32) * float(payoff_scale)
         if equity.shape != (1326, 1326) or payoffs.shape != (3, 3):
             raise ValueError("equity must be (1326,1326) and payoff_matrix (3,3)")
@@ -1011,7 +1013,7 @@ class VectorDCFRSolver:
                                             f"{path}/{action}"))
         child_values = torch.stack(action_values, dim=2)  # (player, combo, action)
         if actor == traverser:
-            hand_action_values = child_values[actor].transpose(0, 1)
+            hand_action_values = child_values[actor]
             node_values = (strategy * hand_action_values).sum(dim=1, keepdim=True)
             regrets = self.regrets[key]
             counterfactual_reach = torch.ones((1326,), dtype=torch.float32, device=self.device)

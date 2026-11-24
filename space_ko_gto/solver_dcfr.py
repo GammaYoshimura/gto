@@ -164,6 +164,11 @@ class MCCFRSolver:
 
     def _terminal_values(self, node: TreeNode, deal: tuple[int, int, int]) -> np.ndarray:
         state = node.state
+        if node.terminal == "FOLD_WIN":
+            winner = state.active[0]
+            values = -np.asarray(state.contributions, dtype=np.float32)
+            values[winner] += state.pot_bb
+            return values
         if node.terminal == "PREFLOP_CALL":
             leaf_ev = self.leaf_evaluator.evaluate_sampled_leaf(
                 active_players=state.active,

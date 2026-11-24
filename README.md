@@ -8,6 +8,8 @@ Este repositorio contiene los contratos de datos, cálculo de equidad configurab
 
 El árbol público se puede construir desde Python con `build_tree((10, 10, 10))`; cada nodo expone estado, acciones con tamaños y ramas hijas. Las subidas se limitan a cuatro rondas y `build_tree` acepta `max_nodes` para evitar expansiones excesivas.
 
+Para consultar SQLite desde Python, importa `BatchExporter` de `space_ko_gto.batch_exporter` y llama `combo_strategy(state_id, "ROOT", combo_index)`. `list_states()` y `list_node_paths(state_id)` permiten descubrir estados y nodos guardados.
+
 ## Inicio rápido
 
 ```bash

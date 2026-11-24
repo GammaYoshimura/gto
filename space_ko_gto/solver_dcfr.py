@@ -133,6 +133,7 @@ class MCCFRSolver:
                 "raises": state.raises,
                 "last_raise": state.last_raise_bb,
                 "last_aggressor": state.last_aggressor,
+                "raise_locked": state.raise_locked,
                 "terminal": node.terminal,
                 "actions": [str(action) for action in node.actions],
             }

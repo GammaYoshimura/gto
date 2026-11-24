@@ -37,6 +37,7 @@ class BettingState:
     raises: int = 0
     last_raise_bb: float = 1.0
     last_aggressor: int | None = None
+    raise_locked: tuple[int, ...] = ()
     history: tuple[str, ...] = ()
 
     @property
@@ -145,6 +146,9 @@ def legal_action_options(state: BettingState) -> tuple[Action, ...]:
     if not any(p != actor and p not in state.all_in for p in state.active):
         # A raise into players who cannot respond is not a legal strategic branch.
         names = [name for name in names if name in ("FOLD", "CALL", "CHECK", "LIMP", "LIMP_BEHIND")]
+    if actor in state.raise_locked:
+        names = [name for name in names if name not in
+                 ("OPEN_RAISE", "ISO_RAISE", "3BET", "SQUEEZE", "4BET", "JAM")]
     result = []
     for name in names:
         if name in ("LIMP", "LIMP_BEHIND", "CALL"):
@@ -183,7 +187,9 @@ def apply_action(state: BettingState, action: Action) -> BettingState:
     pending = list(state.pending)
     raises, last_raise, current_bet = state.raises, state.last_raise_bb, state.current_bet
     last_aggressor = state.last_aggressor
+    raise_locked = set(state.raise_locked)
     pending.remove(actor)
+    raise_locked.add(actor)
     if action.name == "FOLD":
         active.remove(actor)
         if actor in pending:
@@ -202,6 +208,7 @@ def apply_action(state: BettingState, action: Action) -> BettingState:
         full_raise = raise_size >= last_raise - _EPS
         if full_raise:
             last_raise = max(_EPS, raise_size)
+            raise_locked = {actor}
         current_bet = max(current_bet, target)
         contrib[actor] = target
         raises += 1
@@ -210,12 +217,16 @@ def apply_action(state: BettingState, action: Action) -> BettingState:
             all_in.append(actor)
         if full_raise:
             pending = _active_order_after(actor, tuple(p for p in active if p != actor and p not in all_in))
+        else:
+            # A short all-in does not reopen raising for players who acted,
+            # but every non-all-in opponent must still respond to the new bet.
+            pending = _active_order_after(actor, tuple(p for p in active if p != actor and p not in all_in))
     history = state.history + (f"{actor}:{action.name}:{action.target or 0:g}",)
     pending = [p for p in pending if p in active and p not in all_in]
     next_actor = pending[0] if pending else actor
     return BettingState(stacks, tuple(contrib), tuple(active), tuple(sorted(set(all_in))),
                         next_actor, tuple(pending), current_bet, raises, last_raise,
-                        last_aggressor, history)
+                        last_aggressor, tuple(sorted(raise_locked)), history)
 
 
 def terminal_kind(state: BettingState) -> str | None:

@@ -85,7 +85,7 @@ class MCCFRSolver:
         self.root: TreeNode = build_tree(self.stacks, max_nodes=max_nodes)
         self.leaf_evaluator = PreflopEQRLeafEvaluator(self.equity, CARD_REMOVAL_MASK)
         self._checkpoint_config = {
-            "solver": "mccfr-v2",
+            "solver": "mccfr-v3",
             "stacks": list(self.stacks),
             "equity_sha256": hashlib.sha256(self.equity.tobytes()).hexdigest(),
             "payoff_sha256": hashlib.sha256(self.payoffs.tobytes()).hexdigest(),
@@ -95,13 +95,26 @@ class MCCFRSolver:
         self.rng = np.random.default_rng(seed)
         # Sparse per-information-set rows avoid allocating every combo at every node.
         self.regrets: dict[str, dict[int, np.ndarray]] = {}
+        self.regret_last_t: dict[str, dict[int, int]] = {}
         self.strategy_sums: dict[str, dict[int, np.ndarray]] = {}
         self.ev_sums: dict[str, dict[int, np.ndarray]] = {}
         self.row_visits: dict[str, dict[int, float]] = {}
         self.iteration = 0
+        self._positive_log_discount = [0.0]
 
-    def _strategy(self, key: str, combo: int, n_actions: int) -> np.ndarray:
+    def _strategy(self, key: str, combo: int, n_actions: int, iteration: int) -> np.ndarray:
         row = self.regrets.setdefault(key, {}).setdefault(combo, np.zeros(n_actions, dtype=np.float64))
+        last_t = self.regret_last_t.setdefault(key, {}).get(combo, 0)
+        while len(self._positive_log_discount) <= iteration:
+            t = len(self._positive_log_discount)
+            self._positive_log_discount.append(
+                self._positive_log_discount[-1] + np.log(t**1.5 / (t**1.5 + 1.0))
+            )
+        positive_factor = np.exp(self._positive_log_discount[iteration] -
+                                 self._positive_log_discount[last_t])
+        negative_factor = 0.5 ** (iteration - last_t)
+        row *= np.where(row > 0.0, positive_factor, negative_factor)
+        self.regret_last_t[key][combo] = iteration
         positive = np.maximum(row, 0.0)
         total = positive.sum()
         return positive / total if total > 0 else np.full(n_actions, 1.0 / n_actions)
@@ -222,7 +235,7 @@ class MCCFRSolver:
         actor = node.state.actor
         key = path
         combo = deal[actor]
-        strategy = self._strategy(key, combo, len(node.actions))
+        strategy = self._strategy(key, combo, len(node.actions), iteration)
         if actor != traverser:
             action_index = int(self.rng.choice(len(node.actions), p=strategy))
             return self._visit(node.children[action_index], traverser, deal, iteration,
@@ -235,11 +248,8 @@ class MCCFRSolver:
         hero_values = action_values[:, traverser].astype(np.float64)
         node_value = float(np.dot(strategy, hero_values))
         regrets = self.regrets[key][combo]
-        t = max(1, iteration)
-        positive_discount = t**1.5 / (t**1.5 + 1.0)
-        negative_discount = t**0.0 / (t**0.0 + 1.0)
-        regrets *= np.where(regrets > 0, positive_discount, negative_discount)
         regrets += hero_values - node_value
+        t = max(1, iteration)
         weight = (t**2.0 / (t**2.0 + 1.0)) * own_reach
         self.strategy_sums.setdefault(key, {}).setdefault(combo, np.zeros(len(node.actions), dtype=np.float64))[:] += strategy * weight
         self.ev_sums.setdefault(key, {}).setdefault(combo, np.zeros(len(node.actions), dtype=np.float64))[:] += hero_values * weight
@@ -321,6 +331,9 @@ class MCCFRSolver:
             "iteration": self.iteration,
             "rng": self.rng.bit_generator.state,
             "regrets": rows(self.regrets),
+            "regret_last_t": [[key, combo, last_t]
+                              for key, combos in self.regret_last_t.items()
+                              for combo, last_t in combos.items()],
             "strategy_sums": rows(self.strategy_sums),
             "ev_sums": rows(self.ev_sums),
             "row_visits": [[key, combo, value]
@@ -339,6 +352,10 @@ class MCCFRSolver:
             target.clear()
             for key, combo, values in payload[name]:
                 target.setdefault(key, {})[int(combo)] = np.asarray(values, dtype=np.float64)
+        self.regret_last_t.clear()
+        for key, combo, last_t in payload["regret_last_t"]:
+            self.regret_last_t.setdefault(key, {})[int(combo)] = int(last_t)
+        self._positive_log_discount = [0.0]
         self.row_visits.clear()
         for key, combo, value in payload["row_visits"]:
             self.row_visits.setdefault(key, {})[int(combo)] = float(value)

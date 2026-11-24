@@ -73,7 +73,8 @@ def verify_database(db_path: str, tolerance: float = 0.01) -> list[str]:
             checkpoint = json.loads(zlib.decompress(payload))
             if int(checkpoint.get("iteration", -1)) != iteration:
                 issues.append(f"{label}: iteration metadata mismatch")
-            for required in ("config", "rng", "regrets", "strategy_sums", "ev_sums", "row_visits"):
+            for required in ("config", "rng", "regrets", "regret_last_t",
+                             "strategy_sums", "ev_sums", "row_visits"):
                 if required not in checkpoint:
                     issues.append(f"{label}: checkpoint missing {required}")
         except (ValueError, zlib.error, json.JSONDecodeError, AttributeError, TypeError) as exc:

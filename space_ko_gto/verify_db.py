@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
+import zlib
 
 import numpy as np
 
@@ -13,10 +15,19 @@ from .batch_exporter import decode_blob
 
 def verify_database(db_path: str, tolerance: float = 0.01) -> list[str]:
     issues = []
-    with sqlite3.connect(db_path) as db:
-        rows = db.execute("SELECT state_id,node_path,actions_json,strategy_blob,ev_blob FROM nodes").fetchall()
+    try:
+        with sqlite3.connect(db_path) as db:
+            rows = db.execute("SELECT state_id,node_path,actions_json,strategy_blob,ev_blob FROM nodes").fetchall()
+            queue = db.execute("SELECT state_id,status FROM states_queue").fetchall()
+            checkpoints = db.execute("SELECT state_id,iteration,payload FROM solver_checkpoints").fetchall()
+            metrics = db.execute("SELECT state_id,iteration,metric_json FROM solver_metrics").fetchall()
+    except sqlite3.Error as exc:
+        return [f"SQLite schema or read error: {exc}"]
+
+    node_counts = {}
     for state_id, node_path, actions_json, strategy_blob, ev_blob in rows:
         label = f"{state_id}/{node_path}"
+        node_counts[state_id] = node_counts.get(state_id, 0) + 1
         try:
             actions = json.loads(actions_json)
         except (TypeError, json.JSONDecodeError):
@@ -42,6 +53,36 @@ def verify_database(db_path: str, tolerance: float = 0.01) -> list[str]:
             issues.append(f"{label}: strategy frequency outside [0,1]")
         if np.any(np.abs(sums - 1.0) > tolerance):
             issues.append(f"{label}: strategy rows do not sum to 1")
+
+    for state_id, status in queue:
+        if status not in ("PENDING", "RUNNING", "DONE", "FAILED"):
+            issues.append(f"{state_id}: unknown queue status {status!r}")
+        if status == "DONE" and node_counts.get(state_id, 0) == 0:
+            issues.append(f"{state_id}: marked DONE with no exported nodes")
+
+    for state_id, iteration, payload in checkpoints:
+        label = f"{state_id}@{iteration}"
+        try:
+            checkpoint = json.loads(zlib.decompress(payload))
+            if int(checkpoint.get("iteration", -1)) != iteration:
+                issues.append(f"{label}: iteration metadata mismatch")
+            for required in ("config", "rng", "regrets", "strategy_sums", "ev_sums", "row_visits"):
+                if required not in checkpoint:
+                    issues.append(f"{label}: checkpoint missing {required}")
+        except (ValueError, zlib.error, json.JSONDecodeError, AttributeError, TypeError) as exc:
+            issues.append(f"{label}: invalid compressed checkpoint ({exc})")
+
+    for state_id, iteration, metric_json in metrics:
+        label = f"{state_id}@{iteration}"
+        try:
+            metric = json.loads(metric_json)
+            value = float(metric["nashconv_bb_per_deal"])
+            if not math.isfinite(value) or value < 0:
+                issues.append(f"{label}: NashConv must be finite and non-negative")
+            if int(metric["samples"]) < 1:
+                issues.append(f"{label}: sample count must be positive")
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            issues.append(f"{label}: invalid metrics ({exc})")
     return issues
 
 

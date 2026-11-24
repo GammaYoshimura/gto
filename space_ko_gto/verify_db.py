@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import math
 import sqlite3
@@ -83,7 +84,36 @@ def verify_database(db_path: str, tolerance: float = 0.01) -> list[str]:
     for state_id, iteration, payload in checkpoints:
         label = f"{state_id}@{iteration}"
         try:
-            checkpoint = json.loads(zlib.decompress(payload))
+            decompressed = zlib.decompress(payload)
+            if decompressed.startswith(b"PK\x03\x04"):
+                with np.load(io.BytesIO(decompressed), allow_pickle=False) as archive:
+                    checkpoint = json.loads(archive["metadata"].tobytes())
+                    if int(checkpoint.get("iteration", -1)) != iteration:
+                        issues.append(f"{label}: iteration metadata mismatch")
+                    actions_by_path = checkpoint.get("actions", {})
+                    seen_paths = set()
+                    for record in checkpoint.get("nodes", []):
+                        key = record.get("key")
+                        if key in seen_paths:
+                            issues.append(f"{label}: duplicate checkpoint node {key}")
+                        seen_paths.add(key)
+                        actions = actions_by_path.get(key)
+                        expected_names = {"regrets", "strategy_sums", "ev_sums", "ev_weights"}
+                        names = record.get("names", {})
+                        if not isinstance(actions, list) or not actions or set(names) != expected_names:
+                            issues.append(f"{label}: malformed vector checkpoint node {key}")
+                            continue
+                        if len(set(actions)) != len(actions):
+                            issues.append(f"{label}: duplicate actions in checkpoint node {key}")
+                        for name, array_name in names.items():
+                            array = archive[array_name]
+                            expected_shape = (1326,) if name == "ev_weights" else (1326, len(actions))
+                            if array.shape != expected_shape or not np.isfinite(array).all():
+                                issues.append(f"{label}: invalid {name} array at {key}")
+                    if set(actions_by_path) != seen_paths:
+                        issues.append(f"{label}: checkpoint action/node maps differ")
+                continue
+            checkpoint = json.loads(decompressed)
             if int(checkpoint.get("iteration", -1)) != iteration:
                 issues.append(f"{label}: iteration metadata mismatch")
             for required in ("config", "rng", "regrets", "regret_last_t",
@@ -121,12 +151,19 @@ def verify_database(db_path: str, tolerance: float = 0.01) -> list[str]:
         label = f"{state_id}@{iteration}"
         try:
             metric = json.loads(metric_json)
-            value = float(metric["clairvoyant_exploitability_upper_bound_bb_per_deal"])
-            if not math.isfinite(value) or value < 0:
-                issues.append(f"{label}: exploitability upper bound must be finite and non-negative")
-            if metric.get("metric") != "sampled_clairvoyant_exploitability_upper_bound":
+            metric_name = metric.get("metric")
+            if metric_name == "range_based_nashconv_approx":
+                value = float(metric["nashconv"])
+                if metric.get("utility_units") not in ("bb", "prize_units"):
+                    issues.append(f"{label}: invalid NashConv utility units")
+            elif metric_name == "sampled_clairvoyant_exploitability_upper_bound":
+                value = float(metric["clairvoyant_exploitability_upper_bound_bb_per_deal"])
+            else:
                 issues.append(f"{label}: unsupported exploitability metric label")
-            if int(metric["samples"]) < 1:
+                continue
+            if not math.isfinite(value) or value < 0:
+                issues.append(f"{label}: NashConv/exploitability must be finite and non-negative")
+            if metric_name == "sampled_clairvoyant_exploitability_upper_bound" and int(metric["samples"]) < 1:
                 issues.append(f"{label}: sample count must be positive")
         except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
             issues.append(f"{label}: invalid metrics ({exc})")

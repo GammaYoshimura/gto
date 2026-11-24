@@ -1,4 +1,4 @@
-"""DCFR regret matching and external-sampling MCCFR over the public tree."""
+"""Vector DCFR over the full-combo public tree plus legacy MCCFR helpers."""
 
 from __future__ import annotations
 
@@ -6,10 +6,33 @@ import numpy as np
 import json
 import zlib
 import hashlib
+from itertools import permutations
 
 from .constants import CARD_REMOVAL_MASK, COMBO_CARDS
 from .game_tree import TreeNode, build_tree
-from .leaf_evaluator import BaseLeafEvaluator, EQR, PreflopEQRLeafEvaluator
+from .leaf_evaluator import (BaseLeafEvaluator, EQR, PreflopEQRLeafEvaluator,
+                             TorchPreflopEQRLeafEvaluator)
+from .space_ko_icm import icm_equities
+
+
+def _torch_icm_equity(stacks, payouts):
+    """Vectorized three-player ICM for a batch shaped ``(N,3)``."""
+    torch = __import__("torch")
+    total = stacks.sum(dim=1, keepdim=True)
+    first = stacks / torch.clamp(total, min=1e-12)
+    second = torch.zeros_like(stacks)
+    for i in range(3):
+        for j in range(3):
+            if i == j:
+                continue
+            remaining_after_j = total[:, 0] - stacks[:, j]
+            probability_j_first = stacks[:, j] / torch.clamp(total[:, 0], min=1e-12)
+            probability_i_second = stacks[:, i] / torch.clamp(remaining_after_j, min=1e-12)
+            valid = remaining_after_j > 1e-12
+            second[:, i] += torch.where(valid, probability_j_first * probability_i_second,
+                                        torch.zeros_like(probability_i_second))
+    third = torch.clamp(1.0 - first - second, min=0.0)
+    return first * payouts[0] + second * payouts[1] + third * payouts[2]
 
 
 class DCFR:
@@ -58,8 +81,8 @@ class DCFR:
         return np.divide(sums, total, out=np.full_like(sums, 1.0 / sums.shape[1]), where=total > 0)
 
 
-class MCCFRSolver:
-    """External-sampling MCCFR for sampled, non-overlapping private combos.
+class _LegacySampledMCCFRSolver:
+    """Retained only to deserialize old application code; use VectorDCFRSolver.
 
     The public betting tree is complete for its configured sizing abstraction.
     Each iteration samples one legal three-hand deal and traverses the tree once
@@ -69,8 +92,14 @@ class MCCFRSolver:
 
     def __init__(self, stacks, equity: np.ndarray, payoff_matrix: np.ndarray,
                  seed: int = 7, max_nodes: int = 100_000, payoff_scale: float = 1.0,
-                 leaf_evaluator: BaseLeafEvaluator | None = None):
+                 leaf_evaluator: BaseLeafEvaluator | None = None,
+                 prizepool_payouts=(1.0, 0.0, 0.0)):
         self.stacks = tuple(map(float, stacks))
+        self.prizepool_payouts = np.asarray(prizepool_payouts, dtype=np.float64)
+        if self.prizepool_payouts.shape != (3,) or not np.isfinite(self.prizepool_payouts).all() or np.any(self.prizepool_payouts < 0):
+            raise ValueError("prizepool_payouts must have three finite non-negative payouts")
+        self.chip_ev_mode = np.array_equal(self.prizepool_payouts, np.asarray((1.0, 0.0, 0.0)))
+        self.initial_icm = icm_equities(self.stacks, self.prizepool_payouts)
         self.equity = np.asarray(equity, dtype=np.float32)
         if not np.isfinite(payoff_scale) or payoff_scale < 0:
             raise ValueError("payoff_scale must be finite and non-negative")
@@ -88,8 +117,9 @@ class MCCFRSolver:
         if not callable(getattr(self.leaf_evaluator, "checkpoint_fingerprint", None)):
             raise TypeError("leaf_evaluator must implement checkpoint_fingerprint()")
         self._checkpoint_config = {
-            "solver": "mccfr-v5",
+            "solver": "mccfr-v6",
             "stacks": list(self.stacks),
+            "prizepool_payouts": self.prizepool_payouts.tolist(),
             "equity_sha256": hashlib.sha256(self.equity.tobytes()).hexdigest(),
             "payoff_sha256": hashlib.sha256(self.payoffs.tobytes()).hexdigest(),
             "tree_sha256": self._tree_fingerprint(),
@@ -161,7 +191,7 @@ class MCCFRSolver:
         visit(self.root, "ROOT")
         return digest.hexdigest()
 
-    def _showdown_shares(self, players: tuple[int, ...], deal: tuple[int, ...], approximate: bool) -> dict[int, float]:
+    def _showdown_shares(self, players: tuple[int, ...], deal: tuple[int, ...], approximate: bool = False) -> dict[int, float]:
         if len(players) == 1:
             return {players[0]: 1.0}
         if len(players) == 2:
@@ -180,8 +210,32 @@ class MCCFRSolver:
         total = sum(strengths.values())
         return {p: score / total for p, score in strengths.items()}
 
+    def _showdown_rankings(self, players: tuple[int, ...], deal: tuple[int, ...]):
+        """Approximate complete showdown orders from preflop equity strengths."""
+        if len(players) == 1:
+            yield players, 1.0
+            return
+        if len(players) == 2:
+            p, q = players
+            equity = float(self.equity[deal[p], deal[q]])
+            yield (p, q), equity
+            yield (q, p), 1.0 - equity
+            return
+        shares = self._showdown_shares(players, deal)
+        total = 0.0
+        for order in permutations(players):
+            remaining = 1.0
+            probability = 1.0
+            for player in order:
+                denominator = sum(shares[p] for p in players if p not in order[:order.index(player)])
+                probability *= shares[player] / denominator if denominator > 0 else 0.0
+            total += probability
+            yield order, probability
+
     def _terminal_values(self, node: TreeNode, deal: tuple[int, int, int]) -> np.ndarray:
         state = node.state
+        if not self.chip_ev_mode:
+            return self._terminal_icm_values(node, deal)
         if node.terminal == "FOLD_WIN":
             winner = state.active[0]
             values = -np.asarray(state.contributions, dtype=np.float32)
@@ -249,6 +303,84 @@ class MCCFRSolver:
                     share = showdown_shares.get(p, 0.0) / covering_mass
                     values[p] += float(self.payoffs[p, q]) * elimination_chance * share
         return values.astype(np.float32)
+
+    def _terminal_icm_values(self, node: TreeNode, deal: tuple[int, int, int]) -> np.ndarray:
+        state = node.state
+        if node.terminal == "FOLD_WIN":
+            winner = state.active[0]
+            final_stacks = np.asarray(state.stacks, dtype=np.float64) - np.asarray(state.contributions, dtype=np.float64)
+            final_stacks[winner] += state.pot_bb
+            return (icm_equities(final_stacks, self.prizepool_payouts) - self.initial_icm).astype(np.float32)
+
+        if node.terminal == "PREFLOP_CALL":
+            zero_bounties = np.zeros((3, 3), dtype=np.float32)
+            sampled = getattr(self.leaf_evaluator, "evaluate_sampled_leaf", None)
+            if callable(sampled):
+                leaf_ev = sampled(
+                    active_players=state.active,
+                    combo_ids=deal,
+                    pot_bb=state.pot_bb,
+                    contributions=state.contributions,
+                    stacks_rem=state.stacks_rem,
+                    payoff_matrix=zero_bounties,
+                    aggressor=state.last_aggressor,
+                )
+            else:
+                reaches = np.zeros((3, 1326), dtype=np.float32)
+                for player in state.active:
+                    reaches[player, deal[player]] = 1.0
+                leaf_ev = self.leaf_evaluator.evaluate_postflop_leaf(
+                    active_players=state.active,
+                    reaches=reaches,
+                    pot_bb=state.pot_bb,
+                    contributions=state.contributions,
+                    stacks_rem=state.stacks_rem,
+                    payoff_matrix=zero_bounties,
+                    aggressor=state.last_aggressor,
+                )
+                if hasattr(leaf_ev, "detach"):
+                    leaf_ev = leaf_ev.detach().cpu().numpy()
+                leaf_ev = np.asarray([leaf_ev[p, deal[p]] for p in range(3)], dtype=np.float32)
+            if hasattr(leaf_ev, "detach"):
+                leaf_ev = leaf_ev.detach().cpu().numpy()
+            net = np.asarray(leaf_ev, dtype=np.float64)
+            final_stacks = np.maximum(0.0, np.asarray(state.stacks) + net)
+            return (icm_equities(final_stacks, self.prizepool_payouts) - self.initial_icm).astype(np.float32)
+
+        expected_utility = np.zeros(3, dtype=np.float64)
+        levels = sorted(set(c for c in state.contributions if c > 0))
+        for order, probability in self._showdown_rankings(tuple(state.active), deal):
+            if probability <= 0:
+                continue
+            rank = {player: index for index, player in enumerate(order)}
+            awards = np.zeros(3, dtype=np.float64)
+            layer_winners = {}
+            previous = 0.0
+            for level in levels:
+                contributors = [p for p, contribution in enumerate(state.contributions)
+                                if contribution >= level - 1e-9]
+                amount = (level - previous) * len(contributors)
+                previous = level
+                eligible = [p for p in state.active
+                            if state.contributions[p] >= level - 1e-9]
+                if not eligible or amount <= 0:
+                    continue
+                winner = min(eligible, key=lambda p: rank[p])
+                awards[winner] += amount
+                layer_winners[round(level, 9)] = winner
+            final_stacks = np.maximum(0.0, np.asarray(state.stacks, dtype=np.float64) -
+                                      np.asarray(state.contributions, dtype=np.float64) + awards)
+            utility = icm_equities(final_stacks, self.prizepool_payouts) - self.initial_icm
+            if node.terminal == "ALL_IN_SHOWDOWN":
+                for busted in state.all_in:
+                    if final_stacks[busted] > 1e-9:
+                        continue
+                    level = round(float(state.contributions[busted]), 9)
+                    recipient = layer_winners.get(level)
+                    if recipient is not None and recipient != busted:
+                        utility[recipient] += float(self.payoffs[recipient, busted])
+            expected_utility += probability * utility
+        return expected_utility.astype(np.float32)
 
     def _visit(self, node: TreeNode, traverser: int, deal: tuple[int, int, int],
                iteration: int, own_reach: float, path: str) -> np.ndarray:
@@ -457,3 +589,559 @@ class MCCFRSolver:
         if result is None:
             raise ValueError("node is not part of this solver's tree")
         return result
+
+
+class VectorDCFRSolver:
+    """Full-combo, full-tree DCFR using PyTorch range vectors.
+
+    Every decision node stores one regret/average-strategy row for all 1,326
+    combos. Each iteration traverses the public tree once per player, propagates
+    `(3,1326)` realization reaches, and applies exact card-removal masks to
+    pairwise range equity. Three-way equity and multiway ICM are range-based
+    approximations; heads-up conditional equity uses the supplied matrix.
+    """
+
+    def __init__(self, stacks, equity: np.ndarray, payoff_matrix: np.ndarray,
+                 prizepool_payouts=(1.0, 0.0, 0.0), payoff_scale: float = 1.0,
+                 device: str | None = None, max_nodes: int = 100_000,
+                 leaf_evaluator: BaseLeafEvaluator | None = None):
+        try:
+            import torch
+        except ImportError as exc:
+            raise RuntimeError("Install PyTorch with `pip install '.[gpu]'` to use VectorDCFRSolver") from exc
+        self.torch = torch
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        if str(device).startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested but is not available")
+        self.device = torch.device(device)
+        self.stacks = tuple(map(float, stacks))
+        self.payouts = np.asarray(prizepool_payouts, dtype=np.float64)
+        if len(self.stacks) != 3 or any(not np.isfinite(s) or s <= 0 for s in self.stacks):
+            raise ValueError("three finite positive stacks are required")
+        if self.payouts.shape != (3,) or not np.isfinite(self.payouts).all() or np.any(self.payouts < 0):
+            raise ValueError("prizepool_payouts must have three finite non-negative values")
+        if not np.isfinite(payoff_scale) or payoff_scale < 0:
+            raise ValueError("payoff_scale must be finite and non-negative")
+        self.chip_ev_mode = np.array_equal(self.payouts, np.asarray((1.0, 0.0, 0.0)))
+        self.initial_icm = icm_equities(self.stacks, self.payouts)
+        equity = np.asarray(equity, dtype=np.float32)
+        payoffs = np.asarray(payoff_matrix, dtype=np.float32) * float(payoff_scale)
+        if equity.shape != (1326, 1326) or payoffs.shape != (3, 3):
+            raise ValueError("equity must be (1326,1326) and payoff_matrix (3,3)")
+        if (not np.isfinite(equity).all() or np.any(equity < 0) or np.any(equity > 1) or
+                not np.allclose(equity + equity.T, CARD_REMOVAL_MASK, atol=1e-3)):
+            raise ValueError("equity must be finite, complementary and zero on card collisions")
+        if not np.isfinite(payoffs).all() or np.any(payoffs < 0):
+            raise ValueError("payoff_matrix must be finite and non-negative")
+        self.equity = torch.as_tensor(equity, dtype=torch.float32, device=self.device)
+        self.card_mask = torch.as_tensor(CARD_REMOVAL_MASK, dtype=torch.float32, device=self.device)
+        self.payoffs = torch.as_tensor(payoffs, dtype=torch.float32, device=self.device)
+        self.root = build_tree(self.stacks, max_nodes=max_nodes)
+        self.leaf_evaluator = leaf_evaluator or TorchPreflopEQRLeafEvaluator(
+            equity, CARD_REMOVAL_MASK, device=str(self.device))
+        if not callable(getattr(self.leaf_evaluator, "checkpoint_fingerprint", None)):
+            raise TypeError("leaf_evaluator must implement checkpoint_fingerprint()")
+        self._checkpoint_config = {
+            "solver": "vector-dcfr-v1",
+            "stacks": list(self.stacks),
+            "payouts": self.payouts.tolist(),
+            "payoff_scale": float(payoff_scale),
+            "equity_sha256": hashlib.sha256(equity.tobytes()).hexdigest(),
+            "payoff_sha256": hashlib.sha256(payoffs.tobytes()).hexdigest(),
+            "tree_sha256": self._tree_fingerprint(),
+            "leaf_evaluator": self.leaf_evaluator.checkpoint_fingerprint(),
+            "dcfr": {"alpha": 1.5, "beta": 0.0, "gamma": 2.0},
+        }
+        self.iteration = 0
+        self._public_nodes: dict[str, TreeNode] = {}
+        self._index_public_tree(self.root, "ROOT")
+        self.regrets: dict[str, torch.Tensor] = {}
+        self.strategy_sums: dict[str, torch.Tensor] = {}
+        self.ev_sums: dict[str, torch.Tensor] = {}
+        self.ev_weights: dict[str, torch.Tensor] = {}
+        self._node_actions: dict[str, tuple[str, ...]] = {}
+        self.alpha, self.beta, self.gamma = 1.5, 0.0, 2.0
+        self._log_positive = [0.0]
+
+    def _tree_fingerprint(self) -> str:
+        digest = hashlib.sha256()
+
+        def visit(node: TreeNode, path: str):
+            state = node.state
+            record = (path, state.actor, state.active, state.all_in, state.pending,
+                      state.contributions, state.current_bet, state.raises,
+                      state.last_raise_bb, state.last_aggressor, state.raise_locked,
+                      node.terminal, tuple(map(str, node.actions)))
+            digest.update(json.dumps(record, separators=(",", ":")).encode())
+            for action, child in zip(node.actions, node.children):
+                visit(child, f"{path}/{action}")
+        visit(self.root, "ROOT")
+        return digest.hexdigest()
+
+    def _index_public_tree(self, node: TreeNode, path: str) -> None:
+        self._public_nodes[path] = node
+        for action, child in zip(node.actions, node.children):
+            self._index_public_tree(child, f"{path}/{action}")
+
+    def _node_key(self, path: str, actions: tuple) -> str:
+        self._node_actions[path] = tuple(map(str, actions))
+        if path not in self.regrets:
+            n_actions = len(actions)
+            self.regrets[path] = self.torch.zeros((1326, n_actions), dtype=self.torch.float32, device=self.device)
+            self.strategy_sums[path] = self.torch.zeros_like(self.regrets[path])
+            self.ev_sums[path] = self.torch.zeros_like(self.regrets[path])
+            self.ev_weights[path] = self.torch.zeros((1326,), dtype=self.torch.float32, device=self.device)
+        return path
+
+    def _strategy(self, key: str, iteration: int, discount: bool = False) -> "torch.Tensor":
+        torch = self.torch
+        regrets = self.regrets[key]
+        if discount:
+            while len(self._log_positive) <= iteration:
+                t = len(self._log_positive)
+                self._log_positive.append(self._log_positive[-1] + np.log(t**self.alpha / (t**self.alpha + 1.0)))
+            positive = float(np.exp(self._log_positive[iteration] - self._log_positive[iteration - 1]))
+            negative = iteration**self.beta / (iteration**self.beta + 1.0)
+            regrets.mul_(torch.where(regrets > 0, positive, negative))
+        positive_regrets = torch.clamp(regrets, min=0.0)
+        totals = positive_regrets.sum(dim=1, keepdim=True)
+        uniform = torch.full_like(positive_regrets, 1.0 / positive_regrets.shape[1])
+        return torch.where(totals > 0, positive_regrets / torch.clamp(totals, min=1e-30), uniform)
+
+    def _average_strategy(self, key: str) -> "torch.Tensor":
+        sums = self.strategy_sums[key]
+        totals = sums.sum(dim=1, keepdim=True)
+        uniform = self.torch.full_like(sums, 1.0 / sums.shape[1])
+        regrets = self.torch.clamp(self.regrets[key], min=0.0)
+        regret_totals = regrets.sum(dim=1, keepdim=True)
+        current = self.torch.where(regret_totals > 0,
+                                   regrets / self.torch.clamp(regret_totals, min=1e-30), uniform)
+        average = sums / self.torch.clamp(totals, min=1e-30)
+        return self.torch.where(totals > 0, average, current)
+
+    def _pair_equity(self, hero: int, villain: int, reach: "torch.Tensor") -> "torch.Tensor":
+        weights = reach[villain].unsqueeze(0) * self.card_mask
+        denominator = weights.sum(dim=1)
+        numerator = (self.equity * weights).sum(dim=1)
+        return numerator / self.torch.clamp(denominator, min=1e-12)
+
+    def _mix_action_values(self, values: "torch.Tensor", strategy: "torch.Tensor",
+                           actor: int, reach: "torch.Tensor", perspective: int) -> "torch.Tensor":
+        """Mix action values for one player's private hand, respecting blockers."""
+        if perspective == actor:
+            return (values[perspective] * strategy).sum(dim=1)
+        weights = self.card_mask * reach[actor].unsqueeze(0)
+        denominator = weights.sum(dim=1)
+        conditional_strategy = (weights @ strategy) / self.torch.clamp(denominator[:, None], min=1e-12)
+        return (values[perspective] * conditional_strategy).sum(dim=1)
+
+    def _multiway_shares(self, eligible: tuple[int, ...], reach: "torch.Tensor") -> dict[int, "torch.Tensor"]:
+        if len(eligible) == 1:
+            return {eligible[0]: self.torch.ones((1326,), dtype=self.torch.float32, device=self.device)}
+        if len(eligible) == 2:
+            p, q = eligible
+            eq_p = self._pair_equity(p, q, reach)
+            eq_q = self._pair_equity(q, p, reach)
+            return {p: eq_p, q: eq_q}
+        scores = {}
+        for p in eligible:
+            others = [q for q in eligible if q != p]
+            scores[p] = self._pair_equity(p, others[0], reach) * self._pair_equity(p, others[1], reach)
+        range_means = []
+        for p in eligible:
+            mass = reach[p].sum()
+            range_means.append((scores[p] * reach[p]).sum() / self.torch.clamp(mass, min=1e-12))
+        normalizer = sum(range_means)
+        return {p: scores[p] / self.torch.clamp(normalizer, min=1e-12) for p in eligible}
+
+    def _terminal_chip_values(self, node: TreeNode, reach: "torch.Tensor") -> "torch.Tensor":
+        torch = self.torch
+        state = node.state
+        if node.terminal == "FOLD_WIN":
+            values = torch.tensor(-np.asarray(state.contributions), dtype=torch.float32, device=self.device)
+            values[state.active[0]] += state.pot_bb
+            return values[:, None].expand(3, 1326).clone()
+        if node.terminal == "PREFLOP_CALL":
+            evaluator = self.leaf_evaluator
+            if not hasattr(evaluator, "evaluate_postflop_leaf"):
+                raise TypeError("vector solver requires a range-based evaluate_postflop_leaf evaluator")
+            if isinstance(evaluator, TorchPreflopEQRLeafEvaluator):
+                evaluator_reach = reach
+                evaluator_payoffs = self.payoffs if self.chip_ev_mode else torch.zeros_like(self.payoffs)
+            else:
+                evaluator_reach = reach.detach().cpu().numpy()
+                evaluator_payoffs = (self.payoffs if self.chip_ev_mode else torch.zeros_like(self.payoffs))
+                evaluator_payoffs = evaluator_payoffs.detach().cpu().numpy()
+            output = evaluator.evaluate_postflop_leaf(
+                active_players=state.active,
+                reaches=evaluator_reach,
+                pot_bb=state.pot_bb,
+                contributions=state.contributions,
+                stacks_rem=state.stacks_rem,
+                payoff_matrix=evaluator_payoffs,
+                aggressor=state.last_aggressor,
+            )
+            if hasattr(output, "detach"):
+                return output.to(device=self.device, dtype=torch.float32)
+            return torch.as_tensor(output, dtype=torch.float32, device=self.device)
+
+        awards = torch.zeros((3, 1326), dtype=torch.float32, device=self.device)
+        levels = sorted(set(c for c in state.contributions if c > 0))
+        previous = 0.0
+        for level in levels:
+            contributors = [p for p, amount in enumerate(state.contributions) if amount >= level - 1e-9]
+            pot_layer = (level - previous) * len(contributors)
+            previous = level
+            eligible = tuple(p for p in state.active if state.contributions[p] >= level - 1e-9)
+            if not eligible or pot_layer <= 0:
+                continue
+            shares = self._multiway_shares(eligible, reach)
+            for player, share in shares.items():
+                awards[player] += pot_layer * share
+        values = awards - torch.tensor(state.contributions, dtype=torch.float32,
+                                       device=self.device)[:, None]
+        if node.terminal == "ALL_IN_SHOWDOWN" and self.chip_ev_mode:
+            values += self._terminal_token_values(node, reach)
+        return values
+
+    def _terminal_token_values(self, node: TreeNode, reach: "torch.Tensor") -> "torch.Tensor":
+        values = self.torch.zeros((3, 1326), dtype=self.torch.float32, device=self.device)
+        state = node.state
+        for busted in state.all_in:
+            cap = round(float(state.contributions[busted]), 9)
+            eligible = tuple(p for p in state.active if state.contributions[p] >= cap - 1e-9)
+            if not eligible:
+                continue
+            shares = self._multiway_shares(eligible, reach)
+            covering = [p for p in eligible if p != busted and self.stacks[p] >= self.stacks[busted]]
+            for winner in covering:
+                values[winner] += self.payoffs[winner, busted] * shares[winner]
+        return values
+
+    def _terminal_values(self, node: TreeNode, reach: "torch.Tensor") -> "torch.Tensor":
+        if not self.chip_ev_mode and node.terminal == "ALL_IN_SHOWDOWN":
+            return self._terminal_allin_icm_values(node, reach)
+        chip_values = self._terminal_chip_values(node, reach)
+        if self.chip_ev_mode:
+            return chip_values
+        torch = self.torch
+        # Convert expected final stacks to ICM per hero combo. Opponent stacks
+        # are averaged over their card-removal-compatible ranges.
+        final_by_player = torch.tensor(self.stacks, dtype=torch.float32, device=self.device)[:, None] + chip_values
+        result = torch.zeros_like(chip_values)
+        payouts = torch.as_tensor(self.payouts, dtype=torch.float32, device=self.device)
+        for hero in node.state.active:
+            final_matrix = torch.zeros((1326, 3), dtype=torch.float32, device=self.device)
+            final_matrix[:, hero] = torch.clamp(final_by_player[hero], min=0.0)
+            for villain in range(3):
+                if villain == hero:
+                    continue
+                mask = self.card_mask
+                weights = reach[villain].unsqueeze(0) * mask
+                denominator = weights.sum(dim=1)
+                expected = (weights * torch.clamp(final_by_player[villain], min=0.0)[None, :]).sum(dim=1)
+                final_matrix[:, villain] = expected / torch.clamp(denominator, min=1e-12)
+            result[hero] = _torch_icm_equity(final_matrix, payouts)[:, hero] - float(self.initial_icm[hero])
+        for player in range(3):
+            if player not in node.state.active:
+                result[player] = chip_values[player] * 0.0
+        if node.terminal == "ALL_IN_SHOWDOWN":
+            result += self._terminal_token_values(node, reach)
+        return result
+
+    def _allin_outcome_utility(self, node: TreeNode, order: tuple[int, ...]) -> np.ndarray:
+        state = node.state
+        rank = {player: index for index, player in enumerate(order)}
+        awards = np.zeros(3, dtype=np.float64)
+        layer_winners = {}
+        levels = sorted(set(c for c in state.contributions if c > 0))
+        previous = 0.0
+        for level in levels:
+            contributors = [p for p, amount in enumerate(state.contributions) if amount >= level - 1e-9]
+            layer = (level - previous) * len(contributors)
+            previous = level
+            eligible = [p for p in state.active if state.contributions[p] >= level - 1e-9]
+            if layer <= 0 or not eligible:
+                continue
+            winner = min(eligible, key=lambda p: rank[p])
+            awards[winner] += layer
+            layer_winners[round(level, 9)] = winner
+        final_stacks = np.maximum(0.0, np.asarray(state.stacks, dtype=np.float64) -
+                                  np.asarray(state.contributions, dtype=np.float64) + awards)
+        utility = icm_equities(final_stacks, self.payouts) - self.initial_icm
+        for busted in state.all_in:
+            if final_stacks[busted] > 1e-9:
+                continue
+            recipient = layer_winners.get(round(float(state.contributions[busted]), 9))
+            if recipient is not None and recipient != busted:
+                utility[recipient] += float(self.payoffs[recipient, busted])
+        return utility
+
+    def _terminal_allin_icm_values(self, node: TreeNode, reach: "torch.Tensor") -> "torch.Tensor":
+        torch = self.torch
+        active = tuple(node.state.active)
+        result = torch.zeros((3, 1326), dtype=torch.float32, device=self.device)
+        outcomes = {}
+        if len(active) == 2:
+            p, q = active
+            p_win = self._pair_equity(p, q, reach)
+            q_win = self._pair_equity(q, p, reach)
+            outcomes[(p, q)] = self._allin_outcome_utility(node, (p, q))
+            outcomes[(q, p)] = self._allin_outcome_utility(node, (q, p))
+            result[p] = p_win * outcomes[(p, q)][p] + (1.0 - p_win) * outcomes[(q, p)][p]
+            result[q] = q_win * outcomes[(q, p)][q] + (1.0 - q_win) * outcomes[(p, q)][q]
+            return result
+
+        strengths = {}
+        for player in active:
+            opponents = [q for q in active if q != player]
+            strengths[player] = (self._pair_equity(player, opponents[0], reach) *
+                                 self._pair_equity(player, opponents[1], reach))
+        mean_strength = {}
+        for player in active:
+            mass = reach[player].sum()
+            mean_strength[player] = (strengths[player] * reach[player]).sum() / torch.clamp(mass, min=1e-12)
+        for order in permutations(active):
+            outcomes[order] = self._allin_outcome_utility(node, order)
+        for hero in active:
+            opponents = [p for p in active if p != hero]
+            weights = [strengths[hero], mean_strength[opponents[0]].expand(1326),
+                       mean_strength[opponents[1]].expand(1326)]
+            weight_by_player = {hero: weights[0], opponents[0]: weights[1], opponents[1]: weights[2]}
+            total = weights[0] + weights[1] + weights[2]
+            expected = torch.zeros((1326,), dtype=torch.float32, device=self.device)
+            for order, utility in outcomes.items():
+                first, second, _ = order
+                p_first = weight_by_player[first] / torch.clamp(total, min=1e-12)
+                p_second = weight_by_player[second] / torch.clamp(total - weight_by_player[first], min=1e-12)
+                probability = p_first * p_second
+                expected += probability * float(utility[hero])
+            result[hero] = expected
+        return result
+
+    def _walk(self, node: TreeNode, traverser: int, reach: "torch.Tensor",
+              iteration: int, path: str) -> "torch.Tensor":
+        torch = self.torch
+        if node.terminal is not None:
+            return self._terminal_values(node, reach)
+        actor = node.state.actor
+        key = self._node_key(path, node.actions)
+        strategy = self._strategy(key, iteration, discount=(actor == traverser))
+        action_values = []
+        for action_index, action in enumerate(node.actions):
+            next_reach = reach.clone()
+            next_reach[actor] = next_reach[actor] * strategy[:, action_index]
+            action_values.append(self._walk(node.children[action_index], traverser,
+                                            next_reach, iteration,
+                                            f"{path}/{action}"))
+        child_values = torch.stack(action_values, dim=2)  # (player, combo, action)
+        if actor == traverser:
+            hand_action_values = child_values[actor].transpose(0, 1)
+            node_values = (strategy * hand_action_values).sum(dim=1, keepdim=True)
+            regrets = self.regrets[key]
+            counterfactual_reach = torch.ones((1326,), dtype=torch.float32, device=self.device)
+            for opponent in range(3):
+                if opponent != actor:
+                    counterfactual_reach *= self.card_mask @ reach[opponent]
+            regrets.add_((hand_action_values - node_values) * counterfactual_reach[:, None])
+            t = float(iteration)
+            average_weight = t**self.gamma / (t**self.gamma + 1.0)
+            own_reach = reach[actor]
+            weighted_strategy = own_reach[:, None] * average_weight
+            self.strategy_sums[key].add_(strategy * weighted_strategy)
+            weighted_counterfactual = counterfactual_reach[:, None] * average_weight
+            self.ev_sums[key].add_(hand_action_values * weighted_counterfactual)
+            self.ev_weights[key].add_(weighted_counterfactual[:, 0])
+        result = torch.zeros((3, 1326), dtype=torch.float32, device=self.device)
+        for perspective in range(3):
+            result[perspective] = self._mix_action_values(
+                child_values, strategy, actor, reach, perspective)
+        return result
+
+    def solve(self, iterations: int = 1) -> "VectorDCFRSolver":
+        if iterations < 1:
+            raise ValueError("iterations must be positive")
+        reach = self.torch.full((3, 1326), 1.0 / 1326.0,
+                                dtype=self.torch.float32, device=self.device)
+        for _ in range(iterations):
+            self.iteration += 1
+            for traverser in range(3):
+                self._walk(self.root, traverser, reach, self.iteration, "ROOT")
+        return self
+
+    def export(self, exporter, state_id: str) -> None:
+        torch = self.torch
+        records = []
+        for path, actions in self._node_actions.items():
+            node = self._find_public_node(path)
+            strategy_sums = self.strategy_sums[path]
+            denominators = strategy_sums.sum(dim=1, keepdim=True)
+            uniform = torch.full_like(strategy_sums, 1.0 / strategy_sums.shape[1])
+            strategy = torch.where(denominators > 0,
+                                   strategy_sums / torch.clamp(denominators, min=1e-30),
+                                   self._average_strategy(path))
+            ev = self.ev_sums[path] / torch.clamp(self.ev_weights[path][:, None], min=1e-30)
+            records.append((path, node.state.actor, list(actions),
+                            strategy.detach().cpu().numpy(), ev.detach().cpu().numpy()))
+        exporter.export_nodes(state_id, records)
+
+    def _find_public_node(self, target_path: str) -> TreeNode:
+        result = self._public_nodes.get(target_path)
+        if result is None:
+            raise KeyError(target_path)
+        return result
+
+    def checkpoint(self) -> bytes:
+        import io
+        metadata = {"config": self._checkpoint_config, "iteration": self.iteration,
+                    "nodes": [], "actions": self._node_actions}
+        arrays = {}
+        for index, key in enumerate(self.regrets):
+            names = {name: f"{name}_{index}" for name in ("regrets", "strategy_sums", "ev_sums", "ev_weights")}
+            metadata["nodes"].append({"key": key, "names": names})
+            for name, array_name in names.items():
+                arrays[array_name] = getattr(self, name)[key].detach().cpu().numpy()
+        arrays["metadata"] = np.frombuffer(json.dumps(metadata, separators=(",", ":")).encode(), dtype=np.uint8)
+        buffer = io.BytesIO()
+        np.savez_compressed(buffer, **arrays)
+        return zlib.compress(buffer.getvalue(), level=3)
+
+    def restore_checkpoint(self, blob: bytes) -> None:
+        import io
+        with np.load(io.BytesIO(zlib.decompress(blob)), allow_pickle=False) as payload:
+            metadata = json.loads(payload["metadata"].tobytes())
+            if metadata.get("config") != self._checkpoint_config:
+                raise ValueError("checkpoint configuration does not match vector solver, payouts, equity, or tree")
+            iteration = int(metadata["iteration"])
+            if iteration < 0:
+                raise ValueError("checkpoint iteration cannot be negative")
+            node_actions = {key: tuple(actions) for key, actions in metadata["actions"].items()}
+            loaded = []
+            for record in metadata["nodes"]:
+                key = record["key"]
+                required_arrays = {"regrets", "strategy_sums", "ev_sums", "ev_weights"}
+                if set(record.get("names", {})) != required_arrays:
+                    raise ValueError(f"checkpoint arrays are incomplete at {key}")
+                node = self._public_nodes.get(key)
+                if node is None or node.terminal is not None:
+                    raise ValueError(f"checkpoint contains unknown decision node {key}")
+                expected_actions = tuple(map(str, node.actions))
+                if node_actions.get(key) != expected_actions:
+                    raise ValueError(f"checkpoint action list does not match tree at {key}")
+                arrays = {}
+                for name, array_name in record["names"].items():
+                    array = payload[array_name].copy()
+                    expected_shape = ((1326,) if name == "ev_weights" else
+                                      (1326, len(expected_actions)))
+                    if array.shape != expected_shape or not np.isfinite(array).all():
+                        raise ValueError(f"invalid {name} array in checkpoint at {key}")
+                    arrays[name] = array
+                loaded.append((key, arrays))
+        self.iteration = iteration
+        self._node_actions = node_actions
+        for name in ("regrets", "strategy_sums", "ev_sums", "ev_weights"):
+            getattr(self, name).clear()
+        for key, arrays in loaded:
+            for name, array in arrays.items():
+                getattr(self, name)[key] = self.torch.as_tensor(array, dtype=self.torch.float32,
+                                                                 device=self.device)
+
+    def _average_profile(self, node: TreeNode, reach: "torch.Tensor", path: str) -> "torch.Tensor":
+        torch = self.torch
+        if node.terminal is not None:
+            return self._terminal_values(node, reach)
+        actor = node.state.actor
+        key = path
+        if key not in self.strategy_sums:
+            self._node_key(key, node.actions)
+        strategy = self._average_strategy(key)
+        values = []
+        for index, action in enumerate(node.actions):
+            child_reach = reach.clone()
+            child_reach[actor] *= strategy[:, index]
+            values.append(self._average_profile(node.children[index], child_reach, f"{path}/{action}"))
+        children = torch.stack(values, dim=2)
+        result = torch.zeros((3, 1326), dtype=torch.float32, device=self.device)
+        for perspective in range(3):
+            result[perspective] = self._mix_action_values(
+                children, strategy, actor, reach, perspective)
+        return result
+
+    def _best_response(self, node: TreeNode, hero: int, reach: "torch.Tensor",
+                       path: str) -> "torch.Tensor":
+        torch = self.torch
+        if node.terminal is not None:
+            return self._terminal_values(node, reach)[hero]
+        actor = node.state.actor
+        key = path
+        if key not in self.strategy_sums:
+            self._node_key(key, node.actions)
+        if actor == hero:
+            action_values = []
+            for action, child in zip(node.actions, node.children):
+                action_values.append(self._best_response(child, hero, reach, f"{path}/{action}"))
+            return torch.stack(action_values, dim=1).max(dim=1).values
+        strategy = self._average_strategy(key)
+        action_values = []
+        for action, child in zip(node.actions, node.children):
+            child_reach = reach.clone()
+            child_reach[actor] *= strategy[:, len(action_values)]
+            action_values.append(self._best_response(child, hero, child_reach, f"{path}/{action}"))
+        values = torch.stack(action_values, dim=1)
+        weights = self.card_mask * reach[actor].unsqueeze(0)
+        denominator = weights.sum(dim=1)
+        conditional_strategy = (weights @ strategy) / torch.clamp(denominator[:, None], min=1e-12)
+        return (values * conditional_strategy).sum(dim=1)
+
+    def _root_chance_mass(self, hero: int, reach: "torch.Tensor") -> "torch.Tensor":
+        torch = self.torch
+        opponents = [p for p in range(3) if p != hero]
+        if len(opponents) == 1:
+            return self.card_mask @ reach[opponents[0]]
+        q, r = opponents
+        incidence = torch.zeros((52, 1326), dtype=torch.float32, device=self.device)
+        cards = torch.as_tensor(COMBO_CARDS, dtype=self.torch.long, device=self.device)
+        incidence[cards[:, 0], torch.arange(1326, device=self.device)] = 1.0
+        incidence[cards[:, 1], torch.arange(1326, device=self.device)] = 1.0
+        valid_r = reach[r][None, :] * self.card_mask
+        card_mass = valid_r @ incidence.T
+        total_r = valid_r.sum(dim=1, keepdim=True)
+        remaining_r = (total_r - card_mass[:, cards[:, 0]] -
+                       card_mass[:, cards[:, 1]] + valid_r)
+        return (reach[q][None, :] * self.card_mask *
+                torch.clamp(remaining_r, min=0.0)).sum(dim=1)
+
+    def estimate_nashconv(self) -> dict:
+        reach = self.torch.full((3, 1326), 1.0 / 1326.0,
+                                dtype=self.torch.float32, device=self.device)
+        profile = self._average_profile(self.root, reach, "ROOT")
+        base = []
+        best = []
+        for hero in range(3):
+            chance = self._root_chance_mass(hero, reach)
+            weights = reach[hero] * chance
+            denominator = self.torch.clamp(weights.sum(), min=1e-30)
+            base.append(float((profile[hero] * weights).sum() / denominator))
+            best_response = self._best_response(self.root, hero, reach, "ROOT")
+            best.append(float((best_response * weights).sum() / denominator))
+        gaps = [max(0.0, best[p] - base[p]) for p in range(3)]
+        return {"metric": "range_based_nashconv_approx",
+                "utility_units": "bb" if self.chip_ev_mode else "prize_units",
+                "baseline_ev": base, "best_response_ev": best,
+                "player_gaps": gaps, "nashconv": float(sum(gaps))}
+
+
+class MCCFRSolver(VectorDCFRSolver):
+    """Compatibility name for the vector DCFR solver; no combo sampling is used."""
+
+    def __init__(self, stacks, equity, payoff_matrix, seed: int = 7,
+                 max_nodes: int = 100_000, payoff_scale: float = 1.0,
+                 leaf_evaluator: BaseLeafEvaluator | None = None,
+                 prizepool_payouts=(1.0, 0.0, 0.0), device: str | None = None):
+        # ``seed`` remains accepted for callers of the prior sampled solver;
+        # vector range traversals are deterministic and do not consume it.
+        super().__init__(stacks, equity, payoff_matrix,
+                         prizepool_payouts=prizepool_payouts,
+                         payoff_scale=payoff_scale, device=device,
+                         max_nodes=max_nodes, leaf_evaluator=leaf_evaluator)

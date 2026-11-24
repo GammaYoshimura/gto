@@ -11,7 +11,7 @@ import numpy as np
 from .constants import CARD_REMOVAL_MASK, COMBO_CARDS, N_COMBOS, RANKS, SUITS
 
 
-def build_equity_matrix(trials: int = 10_000, seed: int = 7,
+def build_equity_matrix(trials: int = 50_000, seed: int = 7,
                         progress_callback: Callable[[int, int], None] | None = None) -> np.ndarray:
     """Estimate all pair equities from shared random boards using eval7.
 
@@ -60,7 +60,7 @@ def build_equity_matrix(trials: int = 10_000, seed: int = 7,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("equity_1326x1326.npy"))
-    parser.add_argument("--trials", type=int, default=10_000,
+    parser.add_argument("--trials", type=int, default=50_000,
                         help="shared random boards; each valid hand pair sees about 66% of them")
     parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args()

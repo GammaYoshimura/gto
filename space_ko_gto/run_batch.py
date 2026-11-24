@@ -86,13 +86,13 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=1000)
     parser.add_argument("--checkpoint-every", type=int, default=100)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--payoff-to-bb", type=float, default=1.0)
+    parser.add_argument("--token-scale", "--payoff-to-bb", dest="token_scale", type=float, default=1.0)
     parser.add_argument("--limit", type=int, help="maximum number of states in this invocation")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     count = run_batch(args.equity, args.db, args.stack_buckets, args.token_profiles,
                       args.prize_structures, args.iterations, args.checkpoint_every,
-                      args.seed, args.resume, args.payoff_to_bb, args.limit)
+                      args.seed, args.resume, args.token_scale, args.limit)
     print(f"Processed {count} states into {args.db}")
 
 

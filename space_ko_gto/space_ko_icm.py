@@ -38,27 +38,24 @@ def elimination_payoffs(
     token_evs: list[float] | tuple[float, ...],
     prizepool_payouts: list[float] | tuple[float, ...],
 ) -> np.ndarray:
-    """Build B[i,j], immediate KO value to i for eliminating covered j.
+    """Build token-only KO values B[i,j] for eliminating covered player j.
 
-    B includes half of j's token EV as immediate reward and the ICM equity
-    change from transferring j's stack to i. The other token half is treated
-    as future value and represented by the supplied token EV; callers can
-    replace this policy if their tournament token model differs.
+    Tournament chip value is handled separately: chipEV for winner-takes-all,
+    and terminal-stack ICM for multi-place payouts. Including an ICM stack
+    transfer here would count the eliminated chips a second time.
     """
     s = np.asarray(stacks, dtype=np.float64)
     t = np.asarray(token_evs, dtype=np.float64)
     if (s.shape != (3,) or t.shape != (3,) or not np.isfinite(s).all() or
             not np.isfinite(t).all() or np.any(s < 0) or np.any(t < 0)):
         raise ValueError("stacks and token_evs must each contain three non-negative values")
-    base = icm_equities(s, prizepool_payouts)
+    payouts = np.asarray(prizepool_payouts, dtype=np.float64)
+    if payouts.shape != (3,) or not np.isfinite(payouts).all() or np.any(payouts < 0):
+        raise ValueError("prizepool_payouts must contain three finite non-negative values")
     out = np.zeros((3, 3), dtype=np.float32)
     for i in range(3):
         for j in range(3):
             if i == j or s[i] < s[j]:
                 continue
-            after = s.copy()
-            after[i] += after[j]
-            after[j] = 0.0
-            delta_icm = icm_equities(after, prizepool_payouts)[i] - base[i]
-            out[i, j] = max(0.0, 0.5 * t[j] + delta_icm)
+            out[i, j] = 0.5 * t[j]
     return out

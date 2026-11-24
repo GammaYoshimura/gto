@@ -6,6 +6,13 @@ import numpy as np
 
 POSITIONS = ("BTN", "SB", "BB")
 BLINDS = {"BTN": 0.0, "SB": 0.5, "BB": 1.0}
+
+
+def is_ip(hero: int, villain: int) -> bool:
+    """Whether hero acts after villain postflop in the 3-max position order."""
+    return hero == 0 or (hero == 2 and villain == 1)
+
+
 RANKS = "23456789TJQKA"
 SUITS = "cdhs"
 N_CARDS = 52

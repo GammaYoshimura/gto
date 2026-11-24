@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Iterator
 
 from .constants import (ALL_IN_THRESHOLD, FOUR_BET_MULT, OPEN_RAISE_SIZE,
-                        SQUEEZE_MULT, THREE_BET_MULT)
+                        SQUEEZE_MULT, THREE_BET_MULT, is_ip)
 
 _EPS = 1e-9
 _MAX_RAISES = 4
@@ -92,8 +92,7 @@ def _raise_target(state: BettingState, name: str) -> float:
         target = 3.0 if actor == 1 else 3.5
     elif name == "3BET":
         opener_size = max(state.contributions[p] for p in active_others)
-        # BTN (0) is in position over SB (1) and BB (2); SB is IP over BB.
-        ip = last_aggressor is not None and actor < last_aggressor
+        ip = last_aggressor is not None and is_ip(actor, last_aggressor)
         target = opener_size * THREE_BET_MULT["IP" if ip else "OOP"]
     elif name == "SQUEEZE":
         opener_size = max((state.contributions[p] for p in active_others), default=2.0)

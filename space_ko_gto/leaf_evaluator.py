@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 
+from .constants import is_ip
+
 EQR = {
     "IP_AGGRESSOR": 1.12,
     "OOP_AGGRESSOR": 0.92,
@@ -228,7 +230,7 @@ class TorchPreflopEQRLeafEvaluator(BaseLeafEvaluator):
 def _eqr_role(player: int, opponents: list[int], active: tuple[int, ...], aggressor: int | None) -> str:
     if len(active) == 3:
         return "MULTIWAY_3WAY"
-    in_position = player < opponents[0]
+    in_position = is_ip(player, opponents[0])
     if aggressor == player:
         return "IP_AGGRESSOR" if in_position else "OOP_AGGRESSOR"
     return "IP_CALLER" if in_position else "OOP_CALLER"

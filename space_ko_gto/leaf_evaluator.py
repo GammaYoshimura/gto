@@ -39,6 +39,11 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
         self.card_removal = np.asarray(card_removal, dtype=np.float32)
         if self.equity.shape != (1326, 1326) or self.card_removal.shape != (1326, 1326):
             raise ValueError("equity and card_removal must have shape (1326, 1326)")
+        if (not np.isfinite(self.equity).all() or np.any(self.equity < 0) or
+                np.any(self.equity > 1) or not np.isfinite(self.card_removal).all() or
+                not np.isin(self.card_removal, (0.0, 1.0)).all() or
+                not np.allclose(self.equity + self.equity.T, self.card_removal, atol=1e-3)):
+            raise ValueError("equity must be complementary in [0,1] and match the binary card-removal mask")
         self.epsilon = epsilon
 
     def checkpoint_fingerprint(self) -> str:
@@ -49,11 +54,20 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
         reach = np.asarray(reaches, dtype=np.float32)
         bounty = np.asarray(payoff_matrix, dtype=np.float32)
         invested = np.asarray(contributions, dtype=np.float32)
-        if reach.shape != (3, 1326) or bounty.shape != (3, 3) or invested.shape != (3,):
+        remaining = np.asarray(stacks_rem, dtype=np.float32)
+        if (reach.shape != (3, 1326) or bounty.shape != (3, 3) or
+                invested.shape != (3,) or remaining.shape != (3,)):
             raise ValueError("reaches must be (3,1326), contributions (3,), payoff_matrix (3,3)")
         active = tuple(active_players)
-        if len(active) not in (2, 3) or any(p not in range(3) for p in active):
+        if (len(active) not in (2, 3) or len(set(active)) != len(active) or
+                any(not isinstance(p, (int, np.integer)) or p not in range(3) for p in active)):
             raise ValueError("two or three valid active players are required")
+        if (not np.isfinite(reach).all() or np.any(reach < 0) or
+                not np.isfinite(bounty).all() or np.any(bounty < 0) or
+                not np.isfinite(invested).all() or np.any(invested < 0) or
+                not np.isfinite(remaining).all() or np.any(remaining < 0) or
+                not np.isfinite(pot_bb) or pot_bb < 0):
+            raise ValueError("reaches, bounties, pot, contributions and remaining stacks must be finite and non-negative")
         out = np.broadcast_to(-invested[:, None], (3, 1326)).copy()
         pair_equities = {}
         for p in active:
@@ -90,8 +104,22 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
         active = tuple(active_players)
         bounty = np.asarray(payoff_matrix, dtype=np.float32)
         invested = np.asarray(contributions, dtype=np.float32)
-        if len(active) not in (2, 3) or bounty.shape != (3, 3) or invested.shape != (3,):
+        remaining = np.asarray(stacks_rem, dtype=np.float32)
+        combo_ids = tuple(map(int, combo_ids))
+        if (len(active) not in (2, 3) or len(set(active)) != len(active) or
+                bounty.shape != (3, 3) or invested.shape != (3,) or remaining.shape != (3,)):
             raise ValueError("two or three active players, contributions (3,), and payoff matrix (3,3) are required")
+        if (len(active) not in (2, 3) or len(set(active)) != len(active) or
+                any(p not in range(3) for p in active) or
+                len(combo_ids) != 3 or any(combo < 0 or combo >= 1326 for combo in combo_ids) or
+                any(not self.card_removal[combo_ids[p], combo_ids[q]]
+                    for offset, p in enumerate(active) for q in active[offset + 1:])):
+            raise ValueError("combo_ids must identify a legal three-player deal")
+        if (not np.isfinite(bounty).all() or np.any(bounty < 0) or
+                not np.isfinite(invested).all() or np.any(invested < 0) or
+                not np.isfinite(remaining).all() or np.any(remaining < 0) or
+                not np.isfinite(pot_bb) or pot_bb < 0):
+            raise ValueError("bounties, pot, contributions and remaining stacks must be finite and non-negative")
         out = -invested.copy()
         pair_equities = {}
         for p in active:
@@ -139,6 +167,11 @@ class TorchPreflopEQRLeafEvaluator(BaseLeafEvaluator):
         self.card_removal = torch.as_tensor(card_removal, dtype=torch.float32, device=self.device)
         if tuple(self.equity.shape) != (1326, 1326) or tuple(self.card_removal.shape) != (1326, 1326):
             raise ValueError("equity and card_removal must have shape (1326, 1326)")
+        if (not torch.isfinite(self.equity).all() or torch.any(self.equity < 0) or
+                torch.any(self.equity > 1) or not torch.isfinite(self.card_removal).all() or
+                not torch.all((self.card_removal == 0) | (self.card_removal == 1)) or
+                not torch.allclose(self.equity + self.equity.T, self.card_removal, atol=1e-3)):
+            raise ValueError("equity must be complementary in [0,1] and match the binary card-removal mask")
         self.epsilon = float(epsilon)
 
     def checkpoint_fingerprint(self) -> str:
@@ -150,11 +183,19 @@ class TorchPreflopEQRLeafEvaluator(BaseLeafEvaluator):
         reach = torch.as_tensor(reaches, dtype=torch.float32, device=self.device)
         bounty = torch.as_tensor(payoff_matrix, dtype=torch.float32, device=self.device)
         invested = torch.as_tensor(contributions, dtype=torch.float32, device=self.device)
-        if tuple(reach.shape) != (3, 1326) or tuple(bounty.shape) != (3, 3) or tuple(invested.shape) != (3,):
-            raise ValueError("reaches must be (3,1326), contributions (3,), payoff_matrix (3,3)")
+        remaining = torch.as_tensor(stacks_rem, dtype=torch.float32, device=self.device)
+        if (tuple(reach.shape) != (3, 1326) or tuple(bounty.shape) != (3, 3) or
+                tuple(invested.shape) != (3,) or tuple(remaining.shape) != (3,)):
+            raise ValueError("reaches must be (3,1326), contributions and stacks_rem (3,), payoff_matrix (3,3)")
         active = tuple(active_players)
-        if len(active) not in (2, 3) or any(p not in range(3) for p in active):
+        if len(active) not in (2, 3) or len(set(active)) != len(active) or any(p not in range(3) for p in active):
             raise ValueError("two or three valid active players are required")
+        if (not torch.isfinite(reach).all() or torch.any(reach < 0) or
+                not torch.isfinite(bounty).all() or torch.any(bounty < 0) or
+                not torch.isfinite(invested).all() or torch.any(invested < 0) or
+                not torch.isfinite(remaining).all() or torch.any(remaining < 0) or
+                not np.isfinite(pot_bb) or pot_bb < 0):
+            raise ValueError("reaches, bounties, pot, contributions and remaining stacks must be finite and non-negative")
         out = -invested.unsqueeze(1).expand(3, 1326).clone()
         pair_equities = {}
         for p in active:

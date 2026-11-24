@@ -6,7 +6,8 @@ import argparse
 from itertools import product
 from pathlib import Path
 
-from .run_solver import run
+from .batch_exporter import BatchExporter
+from .run_solver import run, state_id_for
 from .state_space import PRIZE_STRUCTURES, STACK_BUCKETS_BB, TOKEN_PROFILES
 
 
@@ -15,9 +16,18 @@ def run_batch(equity_path: Path, db_path: Path, stack_buckets, token_profiles,
               resume: bool, payoff_scale: float, limit: int | None = None) -> int:
     configurations = product(product(stack_buckets, repeat=3), token_profiles, prize_structures)
     completed = 0
+    skipped = 0
+    selected = 0
+    done_states = {state_id for state_id, status in BatchExporter(db_path).list_states("DONE")}
     for stacks, token_name, prize_name in configurations:
-        if limit is not None and completed >= limit:
+        if limit is not None and selected >= limit:
             break
+        selected += 1
+        state_id = state_id_for(stacks, TOKEN_PROFILES[token_name],
+                                PRIZE_STRUCTURES[prize_name], payoff_scale)
+        if resume and state_id in done_states:
+            skipped += 1
+            continue
         state_id, _ = run(
             equity_path=equity_path,
             db_path=db_path,
@@ -32,6 +42,8 @@ def run_batch(equity_path: Path, db_path: Path, stack_buckets, token_profiles,
         )
         completed += 1
         print(f"[{completed}] {state_id} stacks={stacks} tokens={token_name} prizes={prize_name}")
+    if skipped:
+        print(f"Skipped {skipped} states already marked DONE")
     return completed
 
 

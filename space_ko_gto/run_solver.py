@@ -14,7 +14,7 @@ from .solver_dcfr import MCCFRSolver
 from .space_ko_icm import elimination_payoffs
 
 
-def _state_id(stacks, tokens, payouts, payoff_scale) -> str:
+def state_id_for(stacks, tokens, payouts, payoff_scale) -> str:
     payload = json.dumps({"stacks": stacks, "tokens": tokens, "payouts": payouts,
                           "payoff_to_bb": payoff_scale},
                          sort_keys=True, separators=(",", ":"))
@@ -32,7 +32,7 @@ def run(equity_path: Path, db_path: Path, stacks, tokens, payouts,
     if equity.shape != (1326, 1326):
         raise ValueError("equity file must have shape (1326,1326)")
     payoff = elimination_payoffs(stacks, tokens, payouts)
-    state_id = _state_id(stacks, tokens, payouts, payoff_scale)
+    state_id = state_id_for(stacks, tokens, payouts, payoff_scale)
     exporter = BatchExporter(db_path)
     solver = MCCFRSolver(stacks, equity, payoff, seed=seed, payoff_scale=payoff_scale)
     checkpoint = exporter.load_checkpoint(state_id) if resume else None

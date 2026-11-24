@@ -63,7 +63,11 @@ def initial_state(stacks: tuple[float, float, float]) -> BettingState:
     if len(stacks) != 3 or any(float(s) < 1.0 for s in stacks):
         raise ValueError("Three stacks of at least 1 bb are required")
     stacks = tuple(map(float, stacks))
-    return BettingState(stacks=stacks)
+    contributions = (0.0, 0.5, 1.0)
+    all_in = tuple(p for p in range(3) if stacks[p] <= contributions[p] + _EPS)
+    pending = tuple(p for p in range(3) if p not in all_in)
+    return BettingState(stacks=stacks, contributions=contributions, all_in=all_in,
+                        actor=pending[0], pending=pending)
 
 
 def _active_order_after(actor: int, candidates: tuple[int, ...]) -> tuple[int, ...]:
@@ -110,7 +114,10 @@ def legal_action_options(state: BettingState) -> tuple[Action, ...]:
     owed = state.to_call
     prior_limp = any(":LIMP:" in h or ":LIMP_BEHIND:" in h for h in state.history)
     unopened = state.raises == 0 and not prior_limp
-    if owed <= _EPS:
+    if state.raises == 0 and not state.history and actor == 0:
+        # BTN acts first but owes the posted big blind in a three-handed game.
+        names = ["FOLD", "LIMP", "OPEN_RAISE", "JAM"]
+    elif owed <= _EPS:
         if unopened and actor == 0 and not state.history:
             names = ["FOLD", "LIMP", "OPEN_RAISE", "JAM"]
         elif state.raises == 0:

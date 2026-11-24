@@ -19,7 +19,7 @@ class BaseLeafEvaluator(ABC):
     @abstractmethod
     def evaluate_postflop_leaf(self, active_players, reaches, pot_bb, contributions,
                                stacks_rem, payoff_matrix) -> np.ndarray:
-        """Return EVs with shape (3, 1326), one value per player and combo."""
+        """Return net EVs with shape (3,1326), including already-invested chips."""
 
 
 class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
@@ -40,12 +40,13 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
                                stacks_rem, payoff_matrix) -> np.ndarray:
         reach = np.asarray(reaches, dtype=np.float32)
         bounty = np.asarray(payoff_matrix, dtype=np.float32)
-        if reach.shape != (3, 1326) or bounty.shape != (3, 3):
-            raise ValueError("reaches must be (3,1326), payoff_matrix must be (3,3)")
+        invested = np.asarray(contributions, dtype=np.float32)
+        if reach.shape != (3, 1326) or bounty.shape != (3, 3) or invested.shape != (3,):
+            raise ValueError("reaches must be (3,1326), contributions (3,), payoff_matrix (3,3)")
         active = tuple(active_players)
         if len(active) not in (2, 3) or any(p not in range(3) for p in active):
             raise ValueError("two or three valid active players are required")
-        out = np.zeros((3, 1326), dtype=np.float32)
+        out = np.broadcast_to(-invested[:, None], (3, 1326)).copy()
         for p in active:
             opponents = [q for q in active if q != p]
             pair_values = []
@@ -62,17 +63,18 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
             for q in opponents:
                 if stacks_rem[p] >= stacks_rem[q]:
                     ev += bounty[p, q] * stackoff / len(opponents)
-            out[p] = ev.astype(np.float32)
+            out[p] = (ev - invested[p]).astype(np.float32)
         return out
 
-    def evaluate_sampled_leaf(self, active_players, combo_ids, pot_bb, stacks_rem,
+    def evaluate_sampled_leaf(self, active_players, combo_ids, pot_bb, contributions, stacks_rem,
                               payoff_matrix) -> np.ndarray:
         """Fast EQR evaluation for one already-sampled, non-overlapping deal."""
         active = tuple(active_players)
         bounty = np.asarray(payoff_matrix, dtype=np.float32)
-        if len(active) not in (2, 3) or bounty.shape != (3, 3):
-            raise ValueError("two or three active players and a (3,3) payoff matrix are required")
-        out = np.zeros(3, dtype=np.float32)
+        invested = np.asarray(contributions, dtype=np.float32)
+        if len(active) not in (2, 3) or bounty.shape != (3, 3) or invested.shape != (3,):
+            raise ValueError("two or three active players, contributions (3,), and payoff matrix (3,3) are required")
+        out = -invested.copy()
         for p in active:
             opponents = [q for q in active if q != p]
             pair_values = [float(self.equity[combo_ids[p], combo_ids[q]])
@@ -89,7 +91,7 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
             for q in opponents:
                 if stacks_rem[p] >= stacks_rem[q]:
                     ev += float(bounty[p, q]) * stackoff / len(opponents)
-            out[p] = ev
+            out[p] = ev - invested[p]
         return out
 
 
@@ -122,12 +124,13 @@ class TorchPreflopEQRLeafEvaluator(BaseLeafEvaluator):
         torch = self.torch
         reach = torch.as_tensor(reaches, dtype=torch.float32, device=self.device)
         bounty = torch.as_tensor(payoff_matrix, dtype=torch.float32, device=self.device)
-        if tuple(reach.shape) != (3, 1326) or tuple(bounty.shape) != (3, 3):
-            raise ValueError("reaches must be (3,1326), payoff_matrix must be (3,3)")
+        invested = torch.as_tensor(contributions, dtype=torch.float32, device=self.device)
+        if tuple(reach.shape) != (3, 1326) or tuple(bounty.shape) != (3, 3) or tuple(invested.shape) != (3,):
+            raise ValueError("reaches must be (3,1326), contributions (3,), payoff_matrix (3,3)")
         active = tuple(active_players)
         if len(active) not in (2, 3) or any(p not in range(3) for p in active):
             raise ValueError("two or three valid active players are required")
-        out = torch.zeros((3, 1326), dtype=torch.float32, device=self.device)
+        out = -invested.unsqueeze(1).expand(3, 1326).clone()
         for p in active:
             pair_values = []
             for q in active:
@@ -150,5 +153,5 @@ class TorchPreflopEQRLeafEvaluator(BaseLeafEvaluator):
             for q in active:
                 if q != p and stacks_rem[p] >= stacks_rem[q]:
                     ev = ev + bounty[p, q] * stackoff / (len(active) - 1)
-            out[p] = ev
+            out[p] = ev - invested[p]
         return out

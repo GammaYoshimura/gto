@@ -135,12 +135,14 @@ class MCCFRSolver:
                 active_players=state.active,
                 combo_ids=deal,
                 pot_bb=state.pot_bb,
+                contributions=state.contributions,
                 stacks_rem=state.stacks_rem,
                 payoff_matrix=self.payoffs,
             )
-            result = -np.asarray(state.contributions, dtype=np.float32)
+            result = np.zeros(3, dtype=np.float32)
+            result[[p for p in range(3) if p not in state.active]] = -np.asarray(state.contributions, dtype=np.float32)[[p for p in range(3) if p not in state.active]]
             for player in state.active:
-                result[player] += leaf_ev[player]
+                result[player] = leaf_ev[player]
             return result
         values = -np.asarray(state.contributions, dtype=np.float64)
         awards = np.zeros(3, dtype=np.float64)

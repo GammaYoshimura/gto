@@ -9,7 +9,7 @@ import hashlib
 
 from .constants import CARD_REMOVAL_MASK, COMBO_CARDS
 from .game_tree import TreeNode, build_tree
-from .leaf_evaluator import PreflopEQRLeafEvaluator
+from .leaf_evaluator import EQR, PreflopEQRLeafEvaluator
 
 
 class DCFR:
@@ -85,10 +85,12 @@ class MCCFRSolver:
         self.root: TreeNode = build_tree(self.stacks, max_nodes=max_nodes)
         self.leaf_evaluator = PreflopEQRLeafEvaluator(self.equity, CARD_REMOVAL_MASK)
         self._checkpoint_config = {
-            "solver": "mccfr-v1",
+            "solver": "mccfr-v2",
             "stacks": list(self.stacks),
             "equity_sha256": hashlib.sha256(self.equity.tobytes()).hexdigest(),
             "payoff_sha256": hashlib.sha256(self.payoffs.tobytes()).hexdigest(),
+            "tree_sha256": self._tree_fingerprint(),
+            "eqr_factors": EQR,
         }
         self.rng = np.random.default_rng(seed)
         # Sparse per-information-set rows avoid allocating every combo at every node.
@@ -114,6 +116,32 @@ class MCCFRSolver:
             chosen.append(combo)
             used.update(map(int, COMBO_CARDS[combo]))
         return tuple(chosen)
+
+    def _tree_fingerprint(self) -> str:
+        digest = hashlib.sha256()
+
+        def visit(node: TreeNode, path: str) -> None:
+            state = node.state
+            record = {
+                "path": path,
+                "actor": state.actor,
+                "active": state.active,
+                "all_in": state.all_in,
+                "pending": state.pending,
+                "contributions": state.contributions,
+                "current_bet": state.current_bet,
+                "raises": state.raises,
+                "last_raise": state.last_raise_bb,
+                "last_aggressor": state.last_aggressor,
+                "terminal": node.terminal,
+                "actions": [str(action) for action in node.actions],
+            }
+            digest.update(json.dumps(record, sort_keys=True, separators=(",", ":")).encode())
+            for action, child in zip(node.actions, node.children):
+                visit(child, f"{path}/{action}")
+
+        visit(self.root, "ROOT")
+        return digest.hexdigest()
 
     def _showdown_shares(self, players: tuple[int, ...], deal: tuple[int, ...], approximate: bool) -> dict[int, float]:
         if len(players) == 1:

@@ -47,6 +47,7 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
         if len(active) not in (2, 3) or any(p not in range(3) for p in active):
             raise ValueError("two or three valid active players are required")
         out = np.broadcast_to(-invested[:, None], (3, 1326)).copy()
+        pair_equities = {}
         for p in active:
             opponents = [q for q in active if q != p]
             pair_values = []
@@ -54,7 +55,15 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
                 weights = reach[q][None, :] * self.card_removal
                 denom = weights.sum(axis=1) + self.epsilon
                 pair_values.append((self.equity * weights).sum(axis=1) / denom)
-            equity = pair_values[0] if len(pair_values) == 1 else 1.0 / (sum(1.0 / np.clip(x, 1e-5, 1.0) for x in pair_values))
+            pair_equities[p] = pair_values
+        if len(active) == 3:
+            scores = {p: np.prod(pair_equities[p], axis=0) for p in active}
+            normalizer = sum(scores.values()) + self.epsilon
+        else:
+            scores, normalizer = {}, None
+        for p in active:
+            equity = (pair_equities[p][0] if len(active) == 2
+                      else scores[p] / normalizer)
             role = "MULTIWAY_3WAY" if len(active) == 3 else "IP_CALLER"
             eqr = EQR[role]
             ev = float(pot_bb) * np.clip(equity * eqr, 0.0, 1.0)
@@ -75,15 +84,18 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
         if len(active) not in (2, 3) or bounty.shape != (3, 3) or invested.shape != (3,):
             raise ValueError("two or three active players, contributions (3,), and payoff matrix (3,3) are required")
         out = -invested.copy()
+        pair_equities = {}
         for p in active:
             opponents = [q for q in active if q != p]
-            pair_values = [float(self.equity[combo_ids[p], combo_ids[q]])
-                           if self.card_removal[combo_ids[p], combo_ids[q]] else 0.0
-                           for q in opponents]
-            if len(pair_values) == 1:
-                equity = pair_values[0]
-            else:
-                equity = 1.0 / sum(1.0 / max(value, 1e-5) for value in pair_values)
+            pair_equities[p] = [float(self.equity[combo_ids[p], combo_ids[q]])
+                                if self.card_removal[combo_ids[p], combo_ids[q]] else 0.0
+                                for q in opponents]
+        if len(active) == 3:
+            scores = {p: float(np.prod(pair_equities[p])) for p in active}
+            normalizer = sum(scores.values()) or self.epsilon
+        for p in active:
+            equity = (pair_equities[p][0] if len(active) == 2
+                      else scores[p] / normalizer)
             role = "MULTIWAY_3WAY" if len(active) == 3 else "IP_CALLER"
             ev = float(pot_bb) * float(np.clip(equity * EQR[role], 0.0, 1.0))
             spr = max((float(stacks_rem[q]) for q in opponents), default=0.0) / max(float(pot_bb), self.epsilon)
@@ -131,6 +143,7 @@ class TorchPreflopEQRLeafEvaluator(BaseLeafEvaluator):
         if len(active) not in (2, 3) or any(p not in range(3) for p in active):
             raise ValueError("two or three valid active players are required")
         out = -invested.unsqueeze(1).expand(3, 1326).clone()
+        pair_equities = {}
         for p in active:
             pair_values = []
             for q in active:
@@ -140,12 +153,13 @@ class TorchPreflopEQRLeafEvaluator(BaseLeafEvaluator):
                 numerator = torch.sum(self.equity * weights, dim=1)
                 denominator = torch.sum(weights, dim=1) + self.epsilon
                 pair_values.append(numerator / denominator)
-            if len(pair_values) == 1:
-                equity = pair_values[0]
-            else:
-                inverse_sum = sum(1.0 / torch.clamp(value, min=1e-5, max=1.0)
-                                  for value in pair_values)
-                equity = 1.0 / inverse_sum
+            pair_equities[p] = pair_values
+        if len(active) == 3:
+            scores = {p: torch.prod(torch.stack(pair_equities[p]), dim=0) for p in active}
+            normalizer = sum(scores.values()) + self.epsilon
+        for p in active:
+            equity = (pair_equities[p][0] if len(active) == 2
+                      else scores[p] / normalizer)
             role = "MULTIWAY_3WAY" if len(active) == 3 else "IP_CALLER"
             ev = float(pot_bb) * torch.clamp(equity * EQR[role], min=0.0, max=1.0)
             spr = max((float(stacks_rem[q]) for q in active if q != p), default=0.0) / max(float(pot_bb), self.epsilon)

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
 from .constants import CARD_REMOVAL_MASK, COMBO_CARDS, N_COMBOS, RANKS, SUITS
 
 
-def build_equity_matrix(trials: int = 10_000, seed: int = 7) -> np.ndarray:
+def build_equity_matrix(trials: int = 10_000, seed: int = 7,
+                        progress_callback: Callable[[int, int], None] | None = None) -> np.ndarray:
     """Estimate all pair equities from shared random boards using eval7.
 
     A board is reused for every pair of hole-card combos it can coexist with.
@@ -27,7 +29,8 @@ def build_equity_matrix(trials: int = 10_000, seed: int = 7) -> np.ndarray:
     rng = np.random.default_rng(seed)
     equity_sum = np.zeros((N_COMBOS, N_COMBOS), dtype=np.float32)
     observations = np.zeros((N_COMBOS, N_COMBOS), dtype=np.float32)
-    for _ in range(trials):
+    progress_every = max(1, trials // 10)
+    for trial in range(trials):
         board_ids = rng.choice(52, size=5, replace=False)
         board_cards = [deck[int(card_id)] for card_id in board_ids]
         valid_ids = np.flatnonzero(~np.isin(COMBO_CARDS, board_ids).any(axis=1))
@@ -45,6 +48,9 @@ def build_equity_matrix(trials: int = 10_000, seed: int = 7) -> np.ndarray:
         compatible = CARD_REMOVAL_MASK[pair_ids]
         equity_sum[pair_ids] += outcomes * compatible
         observations[pair_ids] += compatible
+        completed = trial + 1
+        if progress_callback is not None and (completed % progress_every == 0 or completed == trials):
+            progress_callback(completed, trials)
     equity = np.full_like(equity_sum, 0.5)
     np.divide(equity_sum, observations, out=equity, where=observations > 0)
     equity *= CARD_REMOVAL_MASK
@@ -58,7 +64,11 @@ def main() -> None:
                         help="shared random boards; each valid hand pair sees about 66% of them")
     parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args()
-    matrix = build_equity_matrix(args.trials, args.seed)
+    matrix = build_equity_matrix(
+        args.trials,
+        args.seed,
+        progress_callback=lambda completed, total: print(f"Boards: {completed}/{total}"),
+    )
     np.save(args.output, matrix)
     print(f"Saved {matrix.shape} float32 equity matrix to {args.output}")
 

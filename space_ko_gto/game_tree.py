@@ -268,5 +268,14 @@ def walk_tree(root: TreeNode) -> Iterator[TreeNode]:
         yield from walk_tree(child)
 
 
-def jam_if_committed(raise_to_bb: float, effective_stack_bb: float) -> bool:
-    return effective_stack_bb <= 0 or raise_to_bb / effective_stack_bb >= ALL_IN_THRESHOLD
+def jam_if_committed(raise_to_bb: float, effective_stack_bb: float,
+                     already_invested_bb: float = 0.0) -> bool:
+    """Whether the raise investment reaches 40% of the remaining stack.
+
+    ``raise_to_bb`` is the target total contribution, while
+    ``already_invested_bb`` is the actor's current contribution.
+    """
+    if effective_stack_bb <= 0:
+        return True
+    investment = max(0.0, float(raise_to_bb) - float(already_invested_bb))
+    return investment / effective_stack_bb >= ALL_IN_THRESHOLD

@@ -64,3 +64,64 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
                     ev += bounty[p, q] * stackoff / len(opponents)
             out[p] = ev.astype(np.float32)
         return out
+
+
+class TorchPreflopEQRLeafEvaluator(BaseLeafEvaluator):
+    """PyTorch implementation of the EQR matrix kernel.
+
+    Importing PyTorch is deferred until construction, so CPU-only installations
+    can use the NumPy evaluator. CUDA is selected automatically when available.
+    """
+
+    def __init__(self, equity, card_removal, device: str | None = None, epsilon: float = 1e-12):
+        try:
+            import torch
+        except ImportError as exc:
+            raise RuntimeError("Install PyTorch with `pip install '.[gpu]'`") from exc
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        if str(device).startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested but is not available")
+        self.torch = torch
+        self.device = torch.device(device)
+        self.equity = torch.as_tensor(equity, dtype=torch.float32, device=self.device)
+        self.card_removal = torch.as_tensor(card_removal, dtype=torch.float32, device=self.device)
+        if tuple(self.equity.shape) != (1326, 1326) or tuple(self.card_removal.shape) != (1326, 1326):
+            raise ValueError("equity and card_removal must have shape (1326, 1326)")
+        self.epsilon = float(epsilon)
+
+    def evaluate_postflop_leaf(self, active_players, reaches, pot_bb, contributions,
+                               stacks_rem, payoff_matrix):
+        torch = self.torch
+        reach = torch.as_tensor(reaches, dtype=torch.float32, device=self.device)
+        bounty = torch.as_tensor(payoff_matrix, dtype=torch.float32, device=self.device)
+        if tuple(reach.shape) != (3, 1326) or tuple(bounty.shape) != (3, 3):
+            raise ValueError("reaches must be (3,1326), payoff_matrix must be (3,3)")
+        active = tuple(active_players)
+        if len(active) not in (2, 3) or any(p not in range(3) for p in active):
+            raise ValueError("two or three valid active players are required")
+        out = torch.zeros((3, 1326), dtype=torch.float32, device=self.device)
+        for p in active:
+            pair_values = []
+            for q in active:
+                if p == q:
+                    continue
+                weights = reach[q].unsqueeze(0) * self.card_removal
+                numerator = torch.sum(self.equity * weights, dim=1)
+                denominator = torch.sum(weights, dim=1) + self.epsilon
+                pair_values.append(numerator / denominator)
+            if len(pair_values) == 1:
+                equity = pair_values[0]
+            else:
+                inverse_sum = sum(1.0 / torch.clamp(value, min=1e-5, max=1.0)
+                                  for value in pair_values)
+                equity = 1.0 / inverse_sum
+            role = "MULTIWAY_3WAY" if len(active) == 3 else "IP_CALLER"
+            ev = float(pot_bb) * torch.clamp(equity * EQR[role], min=0.0, max=1.0)
+            spr = max((float(stacks_rem[q]) for q in active if q != p), default=0.0) / max(float(pot_bb), self.epsilon)
+            stackoff = min(1.0, max(0.0, 1.0 / (1.0 + spr)))
+            for q in active:
+                if q != p and stacks_rem[p] >= stacks_rem[q]:
+                    ev = ev + bounty[p, q] * stackoff / (len(active) - 1)
+            out[p] = ev
+        return out

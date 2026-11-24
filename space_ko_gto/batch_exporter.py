@@ -92,12 +92,26 @@ class BatchExporter:
         """Upsert many node rows under one SQLite transaction."""
         def prepared_rows():
             for node_path, hero_pos, actions, strategy, ev in nodes:
-                strategy = np.asarray(strategy, dtype=np.float16, order="C")
-                ev = np.asarray(ev, dtype=np.float16, order="C")
+                strategy = np.asarray(strategy, dtype=np.float32)
+                ev = np.asarray(ev, dtype=np.float32)
                 if strategy.ndim != 2 or ev.shape != strategy.shape or strategy.shape[1] != len(actions):
                     raise ValueError("strategy and EV must share shape (1326, number of actions)")
                 if strategy.shape[0] != 1326 or hero_pos not in (0, 1, 2):
                     raise ValueError("expected 1326 combos and hero_pos in {0,1,2}")
+                if not actions or any(not isinstance(action, str) or not action for action in actions):
+                    raise ValueError("actions must be a non-empty list of labels")
+                if len(set(actions)) != len(actions):
+                    raise ValueError("action labels must be unique")
+                if not np.isfinite(strategy).all() or not np.isfinite(ev).all():
+                    raise ValueError("strategy and EV must contain only finite values")
+                if np.any(strategy < 0.0) or np.any(strategy > 1.0):
+                    raise ValueError("strategy frequencies must lie in [0,1]")
+                if not np.allclose(strategy.sum(axis=1), 1.0, atol=1e-3, rtol=0.0):
+                    raise ValueError("each strategy row must sum to 1")
+                strategy = np.asarray(strategy, dtype=np.float16, order="C")
+                ev = np.asarray(ev, dtype=np.float16, order="C")
+                if not np.isfinite(strategy).all() or not np.isfinite(ev).all():
+                    raise ValueError("strategy or EV overflows float16 storage")
                 yield (state_id, node_path, hero_pos, json.dumps(actions),
                        strategy.tobytes(), ev.tobytes())
 

@@ -158,8 +158,12 @@ def legal_action_options(state: BettingState) -> tuple[Action, ...]:
         elif name in ("OPEN_RAISE", "ISO_RAISE", "3BET", "SQUEEZE", "4BET", "JAM"):
             target = _raise_target(state, name)
             if target > state.current_bet + _EPS or name == "JAM":
-                normalized = "JAM" if name == "JAM" or target >= state.stacks[actor] - _EPS else name
-                result.append(Action(normalized, target))
+                if target <= state.current_bet + _EPS:
+                    # An all-in below the current bet is only a short call.
+                    result.append(Action("CALL", min(state.current_bet, target)))
+                else:
+                    normalized = "JAM" if name == "JAM" or target >= state.stacks[actor] - _EPS else name
+                    result.append(Action(normalized, target))
         else:
             result.append(Action(name))
     # Deduplicate equivalent raises caused by a short effective stack.

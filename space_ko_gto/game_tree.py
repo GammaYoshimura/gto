@@ -176,7 +176,8 @@ def apply_action(state: BettingState, action: Action) -> BettingState:
         active.remove(actor)
         if actor in pending:
             pending.remove(actor)
-    elif action.name in ("CALL", "LIMP", "LIMP_BEHIND"):
+    elif (action.name in ("CALL", "LIMP", "LIMP_BEHIND") or
+          (action.name == "JAM" and action.target <= state.current_bet + _EPS)):
         contrib[actor] = float(action.target)
         if contrib[actor] >= stacks[actor] - _EPS:
             all_in.append(actor)
@@ -185,13 +186,17 @@ def apply_action(state: BettingState, action: Action) -> BettingState:
         pass
     else:  # raise or jam
         target = min(float(action.target), stacks[actor])
-        last_raise = max(_EPS, target - current_bet)
+        raise_size = target - current_bet
+        full_raise = raise_size >= last_raise - _EPS
+        if full_raise:
+            last_raise = max(_EPS, raise_size)
         current_bet = max(current_bet, target)
         contrib[actor] = target
         raises += 1
         if target >= stacks[actor] - _EPS:
             all_in.append(actor)
-        pending = _active_order_after(actor, tuple(p for p in active if p != actor and p not in all_in))
+        if full_raise:
+            pending = _active_order_after(actor, tuple(p for p in active if p != actor and p not in all_in))
     history = state.history + (f"{actor}:{action.name}:{action.target or 0:g}",)
     pending = [p for p in pending if p in active and p not in all_in]
     next_actor = pending[0] if pending else actor

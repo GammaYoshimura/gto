@@ -16,7 +16,7 @@ python -m space_ko_gto.equity_builder --output equity_1326x1326.npy --trials 100
 space-ko-solve --equity equity_1326x1326.npy --stacks 10 10 10 --iterations 1000
 ```
 
-El generador de equidad usa Monte Carlo (10.000 boards por defecto) para cada pareja válida, lo que puede requerir mucho tiempo. `eval7` se instala como dependencia opcional. Los pares que comparten cartas quedan a cero y la matriz es simétrica por construcción. El solver guarda las medias y su estado de ejecución cada 100 iteraciones; usa `--resume` para continuar un checkpoint con la misma configuración. `TorchPreflopEQRLeafEvaluator` puede ejecutar su kernel en CUDA. El recorrido MCCFR y la validación de convergencia siguen pendientes de aceleración y calibración.
+El generador de equidad usa Monte Carlo (10.000 boards por defecto) para cada pareja válida, lo que puede requerir mucho tiempo. `eval7` se instala como dependencia opcional. Los pares que comparten cartas quedan a cero y la matriz es simétrica por construcción. El solver guarda las medias y su estado de ejecución cada 100 iteraciones; usa `--resume` para continuar un checkpoint con la misma configuración. `TorchPreflopEQRLeafEvaluator` puede ejecutar su kernel en CUDA. El recorrido MCCFR sigue en CPU; `--nashconv-samples 100` calcula una estimación costosa de NashConv por muestreo, con error estadístico y las aproximaciones de los pagos terminales.
 
 ## Contratos
 

@@ -21,7 +21,8 @@ def _state_id(stacks, tokens, payouts) -> str:
 
 
 def run(equity_path: Path, db_path: Path, stacks, tokens, payouts,
-        iterations: int, checkpoint_every: int, seed: int, resume: bool) -> str:
+        iterations: int, checkpoint_every: int, seed: int, resume: bool,
+        nashconv_samples: int = 0) -> tuple[str, dict | None]:
     if iterations < 1 or checkpoint_every < 1:
         raise ValueError("iterations and checkpoint_every must be positive")
     equity = np.load(equity_path, mmap_mode="r")
@@ -46,7 +47,10 @@ def run(equity_path: Path, db_path: Path, stacks, tokens, payouts,
     exporter.export(solver, state_id)
     exporter.save_checkpoint(state_id, solver.iteration, solver.checkpoint())
     exporter.set_status(state_id, "DONE")
-    return state_id
+    metrics = solver.estimate_nashconv(nashconv_samples) if nashconv_samples else None
+    if metrics is not None:
+        exporter.save_metrics(state_id, solver.iteration, metrics)
+    return state_id, metrics
 
 
 def main() -> None:
@@ -60,10 +64,15 @@ def main() -> None:
     parser.add_argument("--checkpoint-every", type=int, default=100)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--resume", action="store_true", help="continue from the SQLite checkpoint")
+    parser.add_argument("--nashconv-samples", type=int, default=0,
+                        help="estimate NashConv on this many sampled deals (slow; 0 disables)")
     args = parser.parse_args()
-    state_id = run(args.equity, args.db, args.stacks, args.tokens, args.payouts,
-                   args.iterations, args.checkpoint_every, args.seed, args.resume)
+    state_id, metrics = run(args.equity, args.db, args.stacks, args.tokens, args.payouts,
+                            args.iterations, args.checkpoint_every, args.seed, args.resume,
+                            args.nashconv_samples)
     print(f"Saved sampled DCFR state {state_id} after {args.iterations} iterations to {args.db}")
+    if metrics is not None:
+        print(json.dumps(metrics, indent=2))
 
 
 if __name__ == "__main__":

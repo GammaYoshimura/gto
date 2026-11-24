@@ -266,6 +266,66 @@ class MCCFRSolver:
         for key, combo, value in payload["row_visits"]:
             self.row_visits.setdefault(key, {})[int(combo)] = float(value)
 
+    def _average_policy(self, key: str, combo: int, n_actions: int) -> np.ndarray:
+        sums = self.strategy_sums.get(key, {}).get(combo)
+        if sums is None or sums.sum() <= 0:
+            return np.full(n_actions, 1.0 / n_actions, dtype=np.float64)
+        return sums / sums.sum()
+
+    def _profile_value(self, node: TreeNode, deal: tuple[int, int, int], path: str) -> np.ndarray:
+        if node.terminal is not None:
+            return self._terminal_values(node, deal)
+        combo = deal[node.state.actor]
+        policy = self._average_policy(path, combo, len(node.actions))
+        value = np.zeros(3, dtype=np.float64)
+        for probability, action, child in zip(policy, node.actions, node.children):
+            value += probability * self._profile_value(child, deal, f"{path}/{action}")
+        return value
+
+    def _best_response_value(self, node: TreeNode, deal: tuple[int, int, int],
+                             hero: int, path: str) -> float:
+        if node.terminal is not None:
+            return float(self._terminal_values(node, deal)[hero])
+        actor = node.state.actor
+        if actor == hero:
+            values = [self._best_response_value(child, deal, hero, f"{path}/{action}")
+                      for action, child in zip(node.actions, node.children)]
+            return max(values)
+        policy = self._average_policy(path, deal[actor], len(node.actions))
+        return sum(probability * self._best_response_value(child, deal, hero, f"{path}/{action}")
+                   for probability, action, child in zip(policy, node.actions, node.children))
+
+    def estimate_nashconv(self, samples: int = 100, seed: int = 73) -> dict:
+        """Estimate NashConv by sampled deals and exact public-tree best responses.
+
+        The estimator is useful for progress tracking, but inherits terminal
+        equity/EQR approximations and has Monte Carlo sampling error.
+        """
+        if samples < 1:
+            raise ValueError("samples must be positive")
+        rng = self.rng
+        self.rng = np.random.default_rng(seed)
+        baseline = np.zeros(3, dtype=np.float64)
+        best_response = np.zeros(3, dtype=np.float64)
+        try:
+            for _ in range(samples):
+                deal = self._deal()
+                baseline += self._profile_value(self.root, deal, "ROOT")
+                for hero in range(3):
+                    best_response[hero] += self._best_response_value(self.root, deal, hero, "ROOT")
+        finally:
+            self.rng = rng
+        baseline /= samples
+        best_response /= samples
+        gaps = np.maximum(0.0, best_response - baseline)
+        return {
+            "samples": samples,
+            "baseline_ev_bb": baseline.tolist(),
+            "best_response_ev_bb": best_response.tolist(),
+            "player_gaps_bb": gaps.tolist(),
+            "nashconv_bb_per_deal": float(gaps.sum()),
+        }
+
     def _path_for(self, target: TreeNode) -> str:
         def search(node: TreeNode, path: str):
             if node is target:

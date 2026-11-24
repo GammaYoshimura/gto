@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from itertools import permutations
 
 
 def icm_equities(stacks: list[float] | tuple[float, ...], payouts: list[float] | tuple[float, ...]) -> np.ndarray:
@@ -14,19 +15,18 @@ def icm_equities(stacks: list[float] | tuple[float, ...], payouts: list[float] |
     if s.sum() <= 0:
         raise ValueError("At least one stack must be positive")
     result = np.zeros(3, dtype=np.float64)
-    for i in range(3):
-        if s[i] == 0:
-            continue
-        result[i] += p[0] * s[i] / s.sum()
-        for j in range(3):
-            if i == j or s[j] == 0:
-                continue
-            remaining = s.sum() - s[i]
-            second = s[j] / remaining
-            result[i] += p[1] * s[i] / s.sum() * second
-            k = 3 - i - j
-            if s[k] > 0:
-                result[i] += p[2] * s[i] / s.sum() * (s[j] / remaining) * (s[k] / (s.sum() - s[i] - s[j]))
+    total = float(s.sum())
+    for order in permutations(range(3)):
+        probability = 1.0
+        remaining = total
+        for player in order:
+            if remaining <= 0:
+                probability = 0.0
+                break
+            probability *= s[player] / remaining
+            remaining -= s[player]
+        for place, player in enumerate(order):
+            result[player] += probability * p[place]
     return result
 
 

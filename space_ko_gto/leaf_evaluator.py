@@ -50,7 +50,7 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
             opponents = [q for q in active if q != p]
             pair_values = []
             for q in opponents:
-                weights = reach[q] * self.card_removal[p * 0 + np.arange(1326)[:, None], np.arange(1326)[None, :]]
+                weights = reach[q][None, :] * self.card_removal
                 denom = weights.sum(axis=1) + self.epsilon
                 pair_values.append((self.equity * weights).sum(axis=1) / denom)
             equity = pair_values[0] if len(pair_values) == 1 else 1.0 / (sum(1.0 / np.clip(x, 1e-5, 1.0) for x in pair_values))

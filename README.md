@@ -4,7 +4,9 @@ Fase 1 de un motor preflop 3-max para torneos Space KO. La arquitectura mantiene
 
 ## Estado
 
-Este repositorio contiene los contratos de datos, generación determinista de combos, cálculo de equidad configurable, utilidad ICM/KO, rejilla de estados, evaluador de hojas y utilidades de persistencia SQLite. El árbol de apuestas y el solver completo DCFR aún necesitan implementación y validación antes de producir estrategias publicables. Las cifras EQR de la especificación son heurísticas iniciales, no una solución postflop exacta.
+Este repositorio contiene los contratos de datos, generación de combos, cálculo de equidad configurable, utilidad ICM/KO, rejilla de estados, un árbol público acotado de apuestas preflop, el núcleo de actualización DCFR por información y utilidades de persistencia SQLite. El recorrido DCFR completo aún debe conectar el árbol con las distribuciones de cartas y los pagos terminales antes de producir estrategias publicables. Las cifras EQR son heurísticas iniciales, no una solución postflop exacta.
+
+El árbol público se puede construir desde Python con `build_tree((10, 10, 10))`; cada nodo expone estado, acciones con tamaños y ramas hijas. Las subidas se limitan a cuatro rondas y `build_tree` acepta `max_nodes` para evitar expansiones excesivas.
 
 ## Inicio rápido
 

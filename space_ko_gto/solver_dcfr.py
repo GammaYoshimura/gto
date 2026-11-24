@@ -44,7 +44,7 @@ class DCFR:
         strategy = self._strategy(current)
         node_value = (strategy * utilities).sum(axis=1, keepdims=True)
         current += utilities - node_value
-        weight = t**self.gamma
+        weight = t**self.gamma / (t**self.gamma + 1.0)
         if reach is not None:
             weight = weight * np.asarray(reach, dtype=np.float64)[:, None]
         self.strategy_sum.setdefault(key, np.zeros_like(utilities))[:] += strategy * weight
@@ -173,7 +173,7 @@ class MCCFRSolver:
         negative_discount = t**0.0 / (t**0.0 + 1.0)
         regrets *= np.where(regrets > 0, positive_discount, negative_discount)
         regrets += hero_values - node_value
-        weight = t**2.0 * own_reach
+        weight = (t**2.0 / (t**2.0 + 1.0)) * own_reach
         self.strategy_sums.setdefault(key, {}).setdefault(combo, np.zeros(len(node.actions), dtype=np.float64))[:] += strategy * weight
         self.ev_sums.setdefault(key, {}).setdefault(combo, np.zeros(len(node.actions), dtype=np.float64))[:] += hero_values * weight
         self.row_visits.setdefault(key, {})[combo] = self.row_visits.setdefault(key, {}).get(combo, 0.0) + weight

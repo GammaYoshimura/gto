@@ -9,7 +9,7 @@ import hashlib
 
 from .constants import CARD_REMOVAL_MASK, COMBO_CARDS
 from .game_tree import TreeNode, build_tree
-from .leaf_evaluator import EQR, PreflopEQRLeafEvaluator
+from .leaf_evaluator import BaseLeafEvaluator, EQR, PreflopEQRLeafEvaluator
 
 
 class DCFR:
@@ -68,7 +68,8 @@ class MCCFRSolver:
     """
 
     def __init__(self, stacks, equity: np.ndarray, payoff_matrix: np.ndarray,
-                 seed: int = 7, max_nodes: int = 100_000, payoff_scale: float = 1.0):
+                 seed: int = 7, max_nodes: int = 100_000, payoff_scale: float = 1.0,
+                 leaf_evaluator: BaseLeafEvaluator | None = None):
         self.stacks = tuple(map(float, stacks))
         self.equity = np.asarray(equity, dtype=np.float32)
         if not np.isfinite(payoff_scale) or payoff_scale < 0:
@@ -83,14 +84,17 @@ class MCCFRSolver:
         if not np.allclose(self.equity + self.equity.T, CARD_REMOVAL_MASK, atol=1e-3):
             raise ValueError("equity matrix must be complementary and zero for card collisions")
         self.root: TreeNode = build_tree(self.stacks, max_nodes=max_nodes)
-        self.leaf_evaluator = PreflopEQRLeafEvaluator(self.equity, CARD_REMOVAL_MASK)
+        self.leaf_evaluator = leaf_evaluator or PreflopEQRLeafEvaluator(self.equity, CARD_REMOVAL_MASK)
+        if not callable(getattr(self.leaf_evaluator, "checkpoint_fingerprint", None)):
+            raise TypeError("leaf_evaluator must implement checkpoint_fingerprint()")
         self._checkpoint_config = {
-            "solver": "mccfr-v3",
+            "solver": "mccfr-v4",
             "stacks": list(self.stacks),
             "equity_sha256": hashlib.sha256(self.equity.tobytes()).hexdigest(),
             "payoff_sha256": hashlib.sha256(self.payoffs.tobytes()).hexdigest(),
             "tree_sha256": self._tree_fingerprint(),
             "eqr_factors": EQR,
+            "leaf_evaluator": self.leaf_evaluator.checkpoint_fingerprint(),
         }
         self.rng = np.random.default_rng(seed)
         # Sparse per-information-set rows avoid allocating every combo at every node.
@@ -184,15 +188,33 @@ class MCCFRSolver:
             values[winner] += state.pot_bb
             return values
         if node.terminal == "PREFLOP_CALL":
-            leaf_ev = self.leaf_evaluator.evaluate_sampled_leaf(
-                active_players=state.active,
-                combo_ids=deal,
-                pot_bb=state.pot_bb,
-                contributions=state.contributions,
-                stacks_rem=state.stacks_rem,
-                payoff_matrix=self.payoffs,
-                aggressor=state.last_aggressor,
-            )
+            sampled = getattr(self.leaf_evaluator, "evaluate_sampled_leaf", None)
+            if callable(sampled):
+                leaf_ev = sampled(
+                    active_players=state.active,
+                    combo_ids=deal,
+                    pot_bb=state.pot_bb,
+                    contributions=state.contributions,
+                    stacks_rem=state.stacks_rem,
+                    payoff_matrix=self.payoffs,
+                    aggressor=state.last_aggressor,
+                )
+            else:
+                reaches = np.zeros((3, 1326), dtype=np.float32)
+                for player in state.active:
+                    reaches[player, deal[player]] = 1.0
+                leaf_ev = self.leaf_evaluator.evaluate_postflop_leaf(
+                    active_players=state.active,
+                    reaches=reaches,
+                    pot_bb=state.pot_bb,
+                    contributions=state.contributions,
+                    stacks_rem=state.stacks_rem,
+                    payoff_matrix=self.payoffs,
+                    aggressor=state.last_aggressor,
+                )
+                if hasattr(leaf_ev, "detach"):
+                    leaf_ev = leaf_ev.detach().cpu().numpy()
+                leaf_ev = np.asarray([leaf_ev[player, deal[player]] for player in range(3)], dtype=np.float32)
             result = np.zeros(3, dtype=np.float32)
             result[[p for p in range(3) if p not in state.active]] = -np.asarray(state.contributions, dtype=np.float32)[[p for p in range(3) if p not in state.active]]
             for player in state.active:

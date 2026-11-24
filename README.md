@@ -30,4 +30,4 @@ El generador de equidad reutiliza cada board aleatorio para todas las manos comp
 - Equidades: `float32`, forma `(1326, 1326)`.
 - Persistencia: SQLite portable con colas de estados y estrategias comprimidas `float16`.
 
-Consulta `docs/PHASE2_POSTFLOP_SPEC.md` para el contrato de extensión postflop.
+El constructor `MCCFRSolver(..., leaf_evaluator=...)` acepta una implementación de `BaseLeafEvaluator`; su método `checkpoint_fingerprint()` identifica la configuración para no reanudar con un evaluador distinto. Si ofrece `evaluate_sampled_leaf`, el solver la usa para la hoja muestreada; en caso contrario llama `evaluate_postflop_leaf` con reaches one-hot. Consulta `docs/PHASE2_POSTFLOP_SPEC.md` para el contrato de extensión postflop.

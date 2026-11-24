@@ -22,6 +22,10 @@ class BaseLeafEvaluator(ABC):
                                stacks_rem, payoff_matrix, aggressor=None) -> Any:
         """Return net EVs shaped (3,1326), as NumPy or a device tensor."""
 
+    def checkpoint_fingerprint(self) -> str:
+        """Stable evaluator identity included in solver checkpoint compatibility."""
+        return f"{type(self).__module__}.{type(self).__qualname__}:v1"
+
 
 class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
     """Approximate postflop EV from preflop equity and realization factors.
@@ -36,6 +40,9 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
         if self.equity.shape != (1326, 1326) or self.card_removal.shape != (1326, 1326):
             raise ValueError("equity and card_removal must have shape (1326, 1326)")
         self.epsilon = epsilon
+
+    def checkpoint_fingerprint(self) -> str:
+        return f"preflop-eqr-v2:{self.epsilon}:{tuple(sorted(EQR.items()))}"
 
     def evaluate_postflop_leaf(self, active_players, reaches, pot_bb, contributions,
                                stacks_rem, payoff_matrix, aggressor=None) -> np.ndarray:
@@ -133,6 +140,9 @@ class TorchPreflopEQRLeafEvaluator(BaseLeafEvaluator):
         if tuple(self.equity.shape) != (1326, 1326) or tuple(self.card_removal.shape) != (1326, 1326):
             raise ValueError("equity and card_removal must have shape (1326, 1326)")
         self.epsilon = float(epsilon)
+
+    def checkpoint_fingerprint(self) -> str:
+        return f"torch-preflop-eqr-v2:{self.epsilon}:{self.device}:{tuple(sorted(EQR.items()))}"
 
     def evaluate_postflop_leaf(self, active_players, reaches, pot_bb, contributions,
                                stacks_rem, payoff_matrix, aggressor=None):

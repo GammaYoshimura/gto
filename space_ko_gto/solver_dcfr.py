@@ -726,6 +726,33 @@ class VectorDCFRSolver:
         numerator = (self.equity * weights).sum(dim=1)
         return numerator / self.torch.clamp(denominator, min=1e-12)
 
+    def _conditional_pair_strength(self, player: int, opponent: int,
+                                   reach: "torch.Tensor") -> "torch.Tensor":
+        """Opponent's strength vs a third range, conditioned on blocker combos."""
+        torch = self.torch
+        base = self._pair_equity(player, opponent, reach)
+        weighted_opponent_range = reach[player] * base
+        numerator = (self.card_mask * weighted_opponent_range.unsqueeze(0) * self.equity.T).sum(dim=1)
+        denominator = (self.card_mask * reach[player].unsqueeze(0)).sum(dim=1)
+        return numerator / torch.clamp(denominator, min=1e-12)
+
+    def _conditional_pair_win_by_blocker(self, winner: int, loser: int,
+                                         reach: "torch.Tensor") -> "torch.Tensor":
+        """P(winner beats loser) for each blocker combo, averaging legal ranges."""
+        torch = self.torch
+        win_weights = self.equity * self.card_mask * reach[loser].unsqueeze(0)
+        legal_weights = self.card_mask * reach[loser].unsqueeze(0)
+        # Rows are winner combos and columns are blocker combos after projection.
+        win_by_winner_blocker = win_weights @ self.card_mask.T
+        mass_by_winner_blocker = legal_weights @ self.card_mask.T
+        win_by_winner_blocker = win_by_winner_blocker / torch.clamp(
+            mass_by_winner_blocker, min=1e-12)
+        winner_legal = self.card_mask.T
+        winner_weights = reach[winner][:, None] * winner_legal
+        denominator = winner_weights.sum(dim=0)
+        return (winner_weights * win_by_winner_blocker).sum(dim=0) / torch.clamp(
+            denominator, min=1e-12)
+
     def _mix_action_values(self, values: "torch.Tensor", strategy: "torch.Tensor",
                            actor: int, reach: "torch.Tensor", perspective: int) -> "torch.Tensor":
         """Mix action values for one player's private hand, respecting blockers."""
@@ -745,15 +772,15 @@ class VectorDCFRSolver:
             eq_q = self._pair_equity(q, p, reach)
             return {p: eq_p, q: eq_q}
         scores = {}
+        normalizers = {}
         for p in eligible:
-            others = [q for q in eligible if q != p]
-            scores[p] = self._pair_equity(p, others[0], reach) * self._pair_equity(p, others[1], reach)
-        range_means = []
-        for p in eligible:
-            mass = reach[p].sum()
-            range_means.append((scores[p] * reach[p]).sum() / self.torch.clamp(mass, min=1e-12))
-        normalizer = sum(range_means)
-        return {p: scores[p] / self.torch.clamp(normalizer, min=1e-12) for p in eligible}
+            q, r = [player for player in eligible if player != p]
+            scores[p] = self._pair_equity(p, q, reach) * self._pair_equity(p, r, reach)
+            cond_q = self._conditional_pair_strength(q, r, reach)
+            cond_r = self._conditional_pair_strength(r, q, reach)
+            normalizers[p] = scores[p] + cond_q + cond_r
+        return {p: scores[p] / self.torch.clamp(normalizers[p], min=1e-12)
+                for p in eligible}
 
     def _terminal_chip_values(self, node: TreeNode, reach: "torch.Tensor") -> "torch.Tensor":
         torch = self.torch
@@ -825,29 +852,67 @@ class VectorDCFRSolver:
         chip_values = self._terminal_chip_values(node, reach)
         if self.chip_ev_mode:
             return chip_values
+        if node.terminal == "PREFLOP_CALL":
+            return self._preflop_call_icm_values(node, reach, chip_values)
         torch = self.torch
-        # Convert expected final stacks to ICM per hero combo. Opponent stacks
-        # are averaged over their card-removal-compatible ranges.
-        final_by_player = torch.tensor(self.stacks, dtype=torch.float32, device=self.device)[:, None] + chip_values
-        result = torch.zeros_like(chip_values)
+        if node.terminal == "FOLD_WIN":
+            final_stacks = torch.as_tensor(self.stacks, dtype=torch.float32,
+                                           device=self.device) + chip_values[:, 0]
+            utility = _torch_icm_equity(final_stacks.unsqueeze(0),
+                                       torch.as_tensor(self.payouts, dtype=torch.float32,
+                                                       device=self.device))[0]
+            utility -= torch.as_tensor(self.initial_icm, dtype=torch.float32, device=self.device)
+            return utility[:, None].expand(3, 1326).clone()
+        raise ValueError(f"unsupported terminal node in ICM mode: {node.terminal}")
+
+    def _preflop_call_icm_values(self, node: TreeNode, reach: "torch.Tensor",
+                                 chip_values: "torch.Tensor") -> "torch.Tensor":
+        """Evaluate discrete win/loss ICM states for the preflop-call leaf."""
+        torch = self.torch
+        state = node.state
+        active = tuple(state.active)
+        contributions = torch.as_tensor(state.contributions, dtype=torch.float32, device=self.device)
+        base_stacks = torch.as_tensor(self.stacks, dtype=torch.float32, device=self.device) - contributions
+        pot = float(state.pot_bb)
+        denominator_pot = max(pot, 1e-12)
         payouts = torch.as_tensor(self.payouts, dtype=torch.float32, device=self.device)
-        for hero in node.state.active:
-            final_matrix = torch.zeros((1326, 3), dtype=torch.float32, device=self.device)
-            final_matrix[:, hero] = torch.clamp(final_by_player[hero], min=0.0)
-            for villain in range(3):
-                if villain == hero:
-                    continue
-                mask = self.card_mask
-                weights = reach[villain].unsqueeze(0) * mask
-                denominator = weights.sum(dim=1)
-                expected = (weights * torch.clamp(final_by_player[villain], min=0.0)[None, :]).sum(dim=1)
-                final_matrix[:, villain] = expected / torch.clamp(denominator, min=1e-12)
-            result[hero] = _torch_icm_equity(final_matrix, payouts)[:, hero] - float(self.initial_icm[hero])
-        for player in range(3):
-            if player not in node.state.active:
-                result[player] = chip_values[player] * 0.0
-        if node.terminal == "ALL_IN_SHOWDOWN":
-            result += self._terminal_token_values(node, reach)
+        result = torch.zeros_like(chip_values)
+
+        for hero in active:
+            p_win = torch.clamp((chip_values[hero] + contributions[hero]) / denominator_pot,
+                                min=0.0, max=1.0)
+            win_stacks = base_stacks[None, :].expand(1326, 3).clone()
+            win_stacks[:, hero] += pot
+            lose_stacks = base_stacks[None, :].expand(1326, 3).clone()
+            opponents = [player for player in active if player != hero]
+            if len(opponents) == 1:
+                lose_stacks[:, opponents[0]] += pot
+            else:
+                q, r = opponents
+                q_strength = self._conditional_pair_strength(q, r, reach)
+                r_strength = self._conditional_pair_strength(r, q, reach)
+                total = torch.clamp(q_strength + r_strength, min=1e-12)
+                lose_stacks[:, q] += pot * q_strength / total
+                lose_stacks[:, r] += pot * r_strength / total
+
+            win_icm = _torch_icm_equity(win_stacks, payouts)
+            lose_icm = _torch_icm_equity(lose_stacks, payouts)
+            result[hero] = (p_win * win_icm[:, hero] +
+                            (1.0 - p_win) * lose_icm[:, hero] - float(self.initial_icm[hero]))
+
+        inactive = [player for player in range(3) if player not in active]
+        if len(active) == 2 and len(inactive) == 1:
+            q, r = active
+            folded = inactive[0]
+            p_q_wins = self._conditional_pair_win_by_blocker(q, r, reach)
+            stacks_q_wins = base_stacks.clone()
+            stacks_q_wins[q] += pot
+            stacks_r_wins = base_stacks.clone()
+            stacks_r_wins[r] += pot
+            icm_q_wins = _torch_icm_equity(stacks_q_wins.unsqueeze(0), payouts)[0, folded]
+            icm_r_wins = _torch_icm_equity(stacks_r_wins.unsqueeze(0), payouts)[0, folded]
+            result[folded] = (p_q_wins * icm_q_wins + (1.0 - p_q_wins) * icm_r_wins -
+                              float(self.initial_icm[folded]))
         return result
 
     def _allin_outcome_utility(self, node: TreeNode, order: tuple[int, ...]) -> np.ndarray:
@@ -891,25 +956,26 @@ class VectorDCFRSolver:
             outcomes[(q, p)] = self._allin_outcome_utility(node, (q, p))
             result[p] = p_win * outcomes[(p, q)][p] + (1.0 - p_win) * outcomes[(q, p)][p]
             result[q] = q_win * outcomes[(q, p)][q] + (1.0 - q_win) * outcomes[(p, q)][q]
+            inactive = [player for player in range(3) if player not in active]
+            if len(inactive) == 1:
+                folded = inactive[0]
+                p_wins = self._conditional_pair_win_by_blocker(p, q, reach)
+                result[folded] = (p_wins * outcomes[(p, q)][folded] +
+                                  (1.0 - p_wins) * outcomes[(q, p)][folded])
             return result
 
-        strengths = {}
+        scores = {}
         for player in active:
-            opponents = [q for q in active if q != player]
-            strengths[player] = (self._pair_equity(player, opponents[0], reach) *
-                                 self._pair_equity(player, opponents[1], reach))
-        mean_strength = {}
-        for player in active:
-            mass = reach[player].sum()
-            mean_strength[player] = (strengths[player] * reach[player]).sum() / torch.clamp(mass, min=1e-12)
+            q, r = [p for p in active if p != player]
+            scores[player] = self._pair_equity(player, q, reach) * self._pair_equity(player, r, reach)
         for order in permutations(active):
             outcomes[order] = self._allin_outcome_utility(node, order)
         for hero in active:
-            opponents = [p for p in active if p != hero]
-            weights = [strengths[hero], mean_strength[opponents[0]].expand(1326),
-                       mean_strength[opponents[1]].expand(1326)]
-            weight_by_player = {hero: weights[0], opponents[0]: weights[1], opponents[1]: weights[2]}
-            total = weights[0] + weights[1] + weights[2]
+            q, r = [p for p in active if p != hero]
+            cond_q = self._conditional_pair_strength(q, r, reach)
+            cond_r = self._conditional_pair_strength(r, q, reach)
+            weight_by_player = {hero: scores[hero], q: cond_q, r: cond_r}
+            total = scores[hero] + cond_q + cond_r
             expected = torch.zeros((1326,), dtype=torch.float32, device=self.device)
             for order, utility in outcomes.items():
                 first, second, _ = order
@@ -918,6 +984,14 @@ class VectorDCFRSolver:
                 probability = p_first * p_second
                 expected += probability * float(utility[hero])
             result[hero] = expected
+        # Folded player's private combo blocks both live players' showdown hands.
+        inactive = [player for player in range(3) if player not in active]
+        if len(inactive) == 1:
+            folded = inactive[0]
+            p, q = active
+            p_wins = self._conditional_pair_win_by_blocker(p, q, reach)
+            result[folded] = (p_wins * outcomes[(p, q)][folded] +
+                              (1.0 - p_wins) * outcomes[(q, p)][folded])
         return result
 
     def _walk(self, node: TreeNode, traverser: int, reach: "torch.Tensor",
@@ -962,26 +1036,21 @@ class VectorDCFRSolver:
     def solve(self, iterations: int = 1) -> "VectorDCFRSolver":
         if iterations < 1:
             raise ValueError("iterations must be positive")
-        reach = self.torch.full((3, 1326), 1.0 / 1326.0,
-                                dtype=self.torch.float32, device=self.device)
-        for _ in range(iterations):
-            self.iteration += 1
-            for traverser in range(3):
-                self._walk(self.root, traverser, reach, self.iteration, "ROOT")
+        with self.torch.no_grad():
+            reach = self.torch.full((3, 1326), 1.0 / 1326.0,
+                                    dtype=self.torch.float32, device=self.device)
+            for _ in range(iterations):
+                self.iteration += 1
+                for traverser in range(3):
+                    self._walk(self.root, traverser, reach, self.iteration, "ROOT")
         return self
 
     def export(self, exporter, state_id: str) -> None:
-        torch = self.torch
         records = []
         for path, actions in self._node_actions.items():
             node = self._find_public_node(path)
-            strategy_sums = self.strategy_sums[path]
-            denominators = strategy_sums.sum(dim=1, keepdim=True)
-            uniform = torch.full_like(strategy_sums, 1.0 / strategy_sums.shape[1])
-            strategy = torch.where(denominators > 0,
-                                   strategy_sums / torch.clamp(denominators, min=1e-30),
-                                   self._average_strategy(path))
-            ev = self.ev_sums[path] / torch.clamp(self.ev_weights[path][:, None], min=1e-30)
+            strategy = self._average_strategy(path)
+            ev = self.ev_sums[path] / self.torch.clamp(self.ev_weights[path][:, None], min=1e-30)
             records.append((path, node.state.actor, list(actions),
                             strategy.detach().cpu().numpy(), ev.detach().cpu().numpy()))
         exporter.export_nodes(state_id, records)
@@ -1113,19 +1182,20 @@ class VectorDCFRSolver:
                 torch.clamp(remaining_r, min=0.0)).sum(dim=1)
 
     def estimate_nashconv(self) -> dict:
-        reach = self.torch.full((3, 1326), 1.0 / 1326.0,
-                                dtype=self.torch.float32, device=self.device)
-        profile = self._average_profile(self.root, reach, "ROOT")
-        base = []
-        best = []
-        for hero in range(3):
-            chance = self._root_chance_mass(hero, reach)
-            weights = reach[hero] * chance
-            denominator = self.torch.clamp(weights.sum(), min=1e-30)
-            base.append(float((profile[hero] * weights).sum() / denominator))
-            best_response = self._best_response(self.root, hero, reach, "ROOT")
-            best.append(float((best_response * weights).sum() / denominator))
-        gaps = [max(0.0, best[p] - base[p]) for p in range(3)]
+        with self.torch.no_grad():
+            reach = self.torch.full((3, 1326), 1.0 / 1326.0,
+                                    dtype=self.torch.float32, device=self.device)
+            profile = self._average_profile(self.root, reach, "ROOT")
+            base = []
+            best = []
+            for hero in range(3):
+                chance = self._root_chance_mass(hero, reach)
+                weights = reach[hero] * chance
+                denominator = self.torch.clamp(weights.sum(), min=1e-30)
+                base.append(float((profile[hero] * weights).sum() / denominator))
+                best_response = self._best_response(self.root, hero, reach, "ROOT")
+                best.append(float((best_response * weights).sum() / denominator))
+            gaps = [max(0.0, best[p] - base[p]) for p in range(3)]
         return {"metric": "range_based_nashconv_approx",
                 "utility_units": "bb" if self.chip_ev_mode else "prize_units",
                 "baseline_ev": base, "best_response_ev": best,

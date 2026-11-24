@@ -68,10 +68,12 @@ class MCCFRSolver:
     """
 
     def __init__(self, stacks, equity: np.ndarray, payoff_matrix: np.ndarray,
-                 seed: int = 7, max_nodes: int = 100_000):
+                 seed: int = 7, max_nodes: int = 100_000, payoff_scale: float = 1.0):
         self.stacks = tuple(map(float, stacks))
         self.equity = np.asarray(equity, dtype=np.float32)
-        self.payoffs = np.asarray(payoff_matrix, dtype=np.float32)
+        if not np.isfinite(payoff_scale) or payoff_scale < 0:
+            raise ValueError("payoff_scale must be finite and non-negative")
+        self.payoffs = np.asarray(payoff_matrix, dtype=np.float32) * float(payoff_scale)
         if self.equity.shape != (1326, 1326) or self.payoffs.shape != (3, 3):
             raise ValueError("equity must be (1326,1326) and payoff_matrix (3,3)")
         if not np.isfinite(self.equity).all() or not np.isfinite(self.payoffs).all():

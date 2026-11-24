@@ -2,6 +2,8 @@
 
 Implement `PostflopSubgameLeafEvaluator` as a subclass of `BaseLeafEvaluator` in `space_ko_gto.leaf_evaluator`. It must preserve the existing `(3, 1326)` reach and EV interfaces, canonical combo IDs, bounty payoff matrix, and SQLite node schema.
 
+The current interface also accepts optional `aggressor` (position index or `None`). Return **net** EV per combo, including the subtraction of `contributions`; the solver must not subtract invested chips a second time. Provide a stable `checkpoint_fingerprint()` that changes whenever evaluator parameters, abstraction, or solver behavior changes. If the evaluator supports sampled deals, implement `evaluate_sampled_leaf(...)` to avoid materializing a full `(3,1326)` result for each MCCFR sample; otherwise the solver uses one-hot reaches and reads the sampled combo entries.
+
 ## Board compression and buckets
 
 - Canonicalize suit-isomorphic flops, mapping reaches to canonical board coordinates. The target is 1,755 strategically distinct flops from 22,100 raw boards.

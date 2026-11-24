@@ -14,6 +14,11 @@ CREATE TABLE IF NOT EXISTS states_queue (
     state_id TEXT PRIMARY KEY,
     status TEXT NOT NULL DEFAULT 'PENDING'
 );
+CREATE TABLE IF NOT EXISTS state_metadata (
+    state_id TEXT PRIMARY KEY,
+    metadata_json TEXT NOT NULL,
+    FOREIGN KEY (state_id) REFERENCES states_queue(state_id)
+);
 CREATE TABLE IF NOT EXISTS nodes (
     state_id TEXT NOT NULL,
     node_path TEXT NOT NULL,
@@ -67,6 +72,17 @@ class BatchExporter:
         with self._connect() as db:
             db.executemany("INSERT OR IGNORE INTO states_queue(state_id) VALUES (?)",
                            ((str(state_id),) for state_id in state_ids))
+
+    def register_state(self, state_id: str, metadata: dict) -> None:
+        with self._connect() as db:
+            db.execute("INSERT OR IGNORE INTO states_queue(state_id) VALUES (?)", (state_id,))
+            db.execute("INSERT OR IGNORE INTO state_metadata(state_id,metadata_json) VALUES (?,?)",
+                       (state_id, json.dumps(metadata, sort_keys=True)))
+
+    def get_state_metadata(self, state_id: str) -> dict | None:
+        with self._connect() as db:
+            row = db.execute("SELECT metadata_json FROM state_metadata WHERE state_id=?", (state_id,)).fetchone()
+        return None if row is None else json.loads(row[0])
 
     def export_node(self, state_id: str, node_path: str, hero_pos: int,
                     actions: list[str], strategy: np.ndarray, ev: np.ndarray) -> None:

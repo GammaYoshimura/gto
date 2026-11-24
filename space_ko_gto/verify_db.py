@@ -19,6 +19,7 @@ def verify_database(db_path: str, tolerance: float = 0.01) -> list[str]:
         with sqlite3.connect(db_path) as db:
             rows = db.execute("SELECT state_id,node_path,actions_json,strategy_blob,ev_blob FROM nodes").fetchall()
             queue = db.execute("SELECT state_id,status FROM states_queue").fetchall()
+            metadata_rows = db.execute("SELECT state_id,metadata_json FROM state_metadata").fetchall()
             checkpoints = db.execute("SELECT state_id,iteration,payload FROM solver_checkpoints").fetchall()
             metrics = db.execute("SELECT state_id,iteration,metric_json FROM solver_metrics").fetchall()
             errors = db.execute("SELECT state_id,error_text FROM state_errors").fetchall()
@@ -63,6 +64,16 @@ def verify_database(db_path: str, tolerance: float = 0.01) -> list[str]:
         if status == "DONE" and node_counts.get(state_id, 0) == 0:
             issues.append(f"{state_id}: marked DONE with no exported nodes")
     statuses = dict(queue)
+    for state_id, metadata_json in metadata_rows:
+        try:
+            metadata = json.loads(metadata_json)
+            for key, length in (("stacks_bb", 3), ("token_evs_prize_units", 3),
+                                ("prizepool_payouts", 3)):
+                values = metadata[key]
+                if len(values) != length or not np.isfinite(np.asarray(values, dtype=np.float64)).all():
+                    issues.append(f"{state_id}: invalid metadata field {key}")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            issues.append(f"{state_id}: invalid state metadata ({exc})")
     for state_id, error_text in errors:
         if statuses.get(state_id) != "FAILED":
             issues.append(f"{state_id}: stored error without FAILED status")

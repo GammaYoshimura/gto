@@ -44,6 +44,9 @@ def run(equity_path: Path, db_path: Path, stacks, tokens, payouts,
         solver.solve(count)
         exporter.export(solver, state_id)
         exporter.save_checkpoint(state_id, solver.iteration, solver.checkpoint())
+        if nashconv_samples and solver.iteration % 200 == 0:
+            metrics = solver.estimate_nashconv(nashconv_samples)
+            exporter.save_metrics(state_id, solver.iteration, metrics)
     exporter.export(solver, state_id)
     exporter.save_checkpoint(state_id, solver.iteration, solver.checkpoint())
     exporter.set_status(state_id, "DONE")
@@ -65,7 +68,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--resume", action="store_true", help="continue from the SQLite checkpoint")
     parser.add_argument("--nashconv-samples", type=int, default=0,
-                        help="estimate NashConv on this many sampled deals (slow; 0 disables)")
+                        help="estimate NashConv on this many deals every 200 iterations and at finish (slow; 0 disables)")
     args = parser.parse_args()
     state_id, metrics = run(args.equity, args.db, args.stacks, args.tokens, args.payouts,
                             args.iterations, args.checkpoint_every, args.seed, args.resume,

@@ -10,7 +10,8 @@ def icm_equities(stacks: list[float] | tuple[float, ...], payouts: list[float] |
     """Return exact three-player ICM equity, allowing zero stacks."""
     s = np.asarray(stacks, dtype=np.float64)
     p = np.asarray(payouts, dtype=np.float64)
-    if s.shape != (3,) or p.shape != (3,) or np.any(s < 0) or np.any(p < 0):
+    if (s.shape != (3,) or p.shape != (3,) or not np.isfinite(s).all() or
+            not np.isfinite(p).all() or np.any(s < 0) or np.any(p < 0)):
         raise ValueError("stacks and payouts must each contain three non-negative values")
     if s.sum() <= 0:
         raise ValueError("At least one stack must be positive")
@@ -46,7 +47,8 @@ def elimination_payoffs(
     """
     s = np.asarray(stacks, dtype=np.float64)
     t = np.asarray(token_evs, dtype=np.float64)
-    if s.shape != (3,) or t.shape != (3,) or np.any(s < 0) or np.any(t < 0):
+    if (s.shape != (3,) or t.shape != (3,) or not np.isfinite(s).all() or
+            not np.isfinite(t).all() or np.any(s < 0) or np.any(t < 0)):
         raise ValueError("stacks and token_evs must each contain three non-negative values")
     base = icm_equities(s, prizepool_payouts)
     out = np.zeros((3, 3), dtype=np.float32)

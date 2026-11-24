@@ -74,8 +74,9 @@ def main() -> None:
     parser.add_argument("--checkpoint-every", type=int, default=100)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--resume", action="store_true", help="continue from the SQLite checkpoint")
-    parser.add_argument("--nashconv-samples", type=int, default=0,
-                        help="estimate NashConv on this many deals every 200 iterations and at finish (slow; 0 disables)")
+    parser.add_argument("--exploitability-samples", "--nashconv-samples", dest="nashconv_samples",
+                        type=int, default=0,
+                        help="sampled clairvoyant upper-bound diagnostic every 200 iterations and at finish (slow; 0 disables)")
     args = parser.parse_args()
     state_id, metrics = run(args.equity, args.db, args.stacks, args.tokens, args.payouts,
                             args.iterations, args.checkpoint_every, args.seed, args.resume,

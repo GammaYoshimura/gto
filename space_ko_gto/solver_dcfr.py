@@ -412,10 +412,11 @@ class MCCFRSolver:
                    for probability, action, child in zip(policy, node.actions, node.children))
 
     def estimate_nashconv(self, samples: int = 100, seed: int = 73) -> dict:
-        """Estimate NashConv by sampled deals and exact public-tree best responses.
+        """Estimate a clairvoyant exploitability upper bound on sampled deals.
 
-        The estimator is useful for progress tracking, but inherits terminal
-        equity/EQR approximations and has Monte Carlo sampling error.
+        The best response observes all three private hands, so this is not the
+        information-set-constrained NashConv. It is useful only as a loose
+        progress diagnostic and inherits terminal-model and Monte Carlo error.
         """
         if samples < 1:
             raise ValueError("samples must be positive")
@@ -435,11 +436,12 @@ class MCCFRSolver:
         best_response /= samples
         gaps = np.maximum(0.0, best_response - baseline)
         return {
+            "metric": "sampled_clairvoyant_exploitability_upper_bound",
             "samples": samples,
             "baseline_ev_bb": baseline.tolist(),
-            "best_response_ev_bb": best_response.tolist(),
+            "clairvoyant_best_response_ev_bb": best_response.tolist(),
             "player_gaps_bb": gaps.tolist(),
-            "nashconv_bb_per_deal": float(gaps.sum()),
+            "clairvoyant_exploitability_upper_bound_bb_per_deal": float(gaps.sum()),
         }
 
     def _path_for(self, target: TreeNode) -> str:

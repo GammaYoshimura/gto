@@ -110,9 +110,11 @@ def verify_database(db_path: str, tolerance: float = 0.01) -> list[str]:
         label = f"{state_id}@{iteration}"
         try:
             metric = json.loads(metric_json)
-            value = float(metric["nashconv_bb_per_deal"])
+            value = float(metric["clairvoyant_exploitability_upper_bound_bb_per_deal"])
             if not math.isfinite(value) or value < 0:
-                issues.append(f"{label}: NashConv must be finite and non-negative")
+                issues.append(f"{label}: exploitability upper bound must be finite and non-negative")
+            if metric.get("metric") != "sampled_clairvoyant_exploitability_upper_bound":
+                issues.append(f"{label}: unsupported exploitability metric label")
             if int(metric["samples"]) < 1:
                 issues.append(f"{label}: sample count must be positive")
         except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:

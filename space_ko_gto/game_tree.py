@@ -84,7 +84,8 @@ def _raise_target(state: BettingState, name: str) -> float:
         target = 3.0 if actor == 1 else 3.5
     elif name == "3BET":
         opener_size = max(state.contributions[p] for p in active_others)
-        ip = last_aggressor is not None and actor == (last_aggressor + 1) % 3
+        # BTN (0) is in position over SB (1) and BB (2); SB is IP over BB.
+        ip = last_aggressor is not None and actor < last_aggressor
         target = opener_size * THREE_BET_MULT["IP" if ip else "OOP"]
     elif name == "SQUEEZE":
         opener_size = max((state.contributions[p] for p in active_others), default=2.0)

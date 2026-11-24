@@ -23,6 +23,13 @@ CREATE TABLE IF NOT EXISTS nodes (
     PRIMARY KEY (state_id, node_path),
     FOREIGN KEY (state_id) REFERENCES states_queue(state_id)
 );
+CREATE TABLE IF NOT EXISTS solver_checkpoints (
+    state_id TEXT PRIMARY KEY,
+    iteration INTEGER NOT NULL,
+    payload BLOB NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (state_id) REFERENCES states_queue(state_id)
+);
 """
 
 
@@ -55,7 +62,22 @@ class BatchExporter:
             db.execute("INSERT OR REPLACE INTO nodes VALUES (?, ?, ?, ?, ?, ?)",
                        (state_id, node_path, hero_pos, json.dumps(actions),
                         strategy.tobytes(), ev.tobytes()))
-            db.execute("UPDATE states_queue SET status='DONE' WHERE state_id=?", (state_id,))
+
+    def set_status(self, state_id: str, status: str) -> None:
+        with self._connect() as db:
+            db.execute("INSERT OR IGNORE INTO states_queue(state_id) VALUES (?)", (state_id,))
+            db.execute("UPDATE states_queue SET status=? WHERE state_id=?", (status, state_id))
+
+    def save_checkpoint(self, state_id: str, iteration: int, payload: bytes) -> None:
+        with self._connect() as db:
+            db.execute("INSERT OR IGNORE INTO states_queue(state_id) VALUES (?)", (state_id,))
+            db.execute("INSERT OR REPLACE INTO solver_checkpoints(state_id,iteration,payload) VALUES (?,?,?)",
+                       (state_id, int(iteration), sqlite3.Binary(payload)))
+
+    def load_checkpoint(self, state_id: str) -> tuple[int, bytes] | None:
+        with self._connect() as db:
+            row = db.execute("SELECT iteration,payload FROM solver_checkpoints WHERE state_id=?", (state_id,)).fetchone()
+        return None if row is None else (int(row[0]), bytes(row[1]))
 
 
 def decode_blob(blob: bytes, shape: tuple[int, int]) -> np.ndarray:

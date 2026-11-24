@@ -36,6 +36,7 @@ class BettingState:
     current_bet: float = 1.0
     raises: int = 0
     last_raise_bb: float = 1.0
+    last_aggressor: int | None = None
     history: tuple[str, ...] = ()
 
     @property
@@ -78,8 +79,7 @@ def _active_order_after(actor: int, candidates: tuple[int, ...]) -> tuple[int, .
 def _raise_target(state: BettingState, name: str) -> float:
     actor = state.actor
     active_others = [p for p in state.active if p != actor]
-    last_aggressor = next((int(item.split(":")[0]) for item in reversed(state.history)
-                           if item.split(":", 1)[1].startswith(("OPEN_RAISE", "ISO_RAISE", "3BET", "SQUEEZE", "4BET"))), None)
+    last_aggressor = state.last_aggressor
     contestable = [p for p in active_others if p not in state.all_in]
     effective = min([state.stacks_rem[actor]] + [state.stacks_rem[p] for p in contestable])
     if name == "OPEN_RAISE":
@@ -182,6 +182,7 @@ def apply_action(state: BettingState, action: Action) -> BettingState:
     all_in = list(state.all_in)
     pending = list(state.pending)
     raises, last_raise, current_bet = state.raises, state.last_raise_bb, state.current_bet
+    last_aggressor = state.last_aggressor
     pending.remove(actor)
     if action.name == "FOLD":
         active.remove(actor)
@@ -204,6 +205,7 @@ def apply_action(state: BettingState, action: Action) -> BettingState:
         current_bet = max(current_bet, target)
         contrib[actor] = target
         raises += 1
+        last_aggressor = actor
         if target >= stacks[actor] - _EPS:
             all_in.append(actor)
         if full_raise:
@@ -212,7 +214,8 @@ def apply_action(state: BettingState, action: Action) -> BettingState:
     pending = [p for p in pending if p in active and p not in all_in]
     next_actor = pending[0] if pending else actor
     return BettingState(stacks, tuple(contrib), tuple(active), tuple(sorted(set(all_in))),
-                        next_actor, tuple(pending), current_bet, raises, last_raise, history)
+                        next_actor, tuple(pending), current_bet, raises, last_raise,
+                        last_aggressor, history)
 
 
 def terminal_kind(state: BettingState) -> str | None:

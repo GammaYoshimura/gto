@@ -19,7 +19,7 @@ EQR = {
 class BaseLeafEvaluator(ABC):
     @abstractmethod
     def evaluate_postflop_leaf(self, active_players, reaches, pot_bb, contributions,
-                               stacks_rem, payoff_matrix) -> Any:
+                               stacks_rem, payoff_matrix, aggressor=None) -> Any:
         """Return net EVs shaped (3,1326), as NumPy or a device tensor."""
 
 
@@ -38,7 +38,7 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
         self.epsilon = epsilon
 
     def evaluate_postflop_leaf(self, active_players, reaches, pot_bb, contributions,
-                               stacks_rem, payoff_matrix) -> np.ndarray:
+                               stacks_rem, payoff_matrix, aggressor=None) -> np.ndarray:
         reach = np.asarray(reaches, dtype=np.float32)
         bounty = np.asarray(payoff_matrix, dtype=np.float32)
         invested = np.asarray(contributions, dtype=np.float32)
@@ -66,7 +66,7 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
             opponents = [q for q in active if q != p]
             equity = (pair_equities[p][0] if len(active) == 2
                       else scores[p] / normalizer)
-            role = "MULTIWAY_3WAY" if len(active) == 3 else "IP_CALLER"
+            role = _eqr_role(p, opponents, active, aggressor)
             eqr = EQR[role]
             ev = float(pot_bb) * np.clip(equity * eqr, 0.0, 1.0)
             spr = max((float(stacks_rem[q]) for q in opponents), default=0.0) / max(float(pot_bb), self.epsilon)
@@ -78,7 +78,7 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
         return out
 
     def evaluate_sampled_leaf(self, active_players, combo_ids, pot_bb, contributions, stacks_rem,
-                              payoff_matrix) -> np.ndarray:
+                              payoff_matrix, aggressor=None) -> np.ndarray:
         """Fast EQR evaluation for one already-sampled, non-overlapping deal."""
         active = tuple(active_players)
         bounty = np.asarray(payoff_matrix, dtype=np.float32)
@@ -99,7 +99,7 @@ class PreflopEQRLeafEvaluator(BaseLeafEvaluator):
             opponents = [q for q in active if q != p]
             equity = (pair_equities[p][0] if len(active) == 2
                       else scores[p] / normalizer)
-            role = "MULTIWAY_3WAY" if len(active) == 3 else "IP_CALLER"
+            role = _eqr_role(p, opponents, active, aggressor)
             ev = float(pot_bb) * float(np.clip(equity * EQR[role], 0.0, 1.0))
             spr = max((float(stacks_rem[q]) for q in opponents), default=0.0) / max(float(pot_bb), self.epsilon)
             stackoff = float(np.clip(1.0 / (1.0 + spr), 0.0, 1.0))
@@ -135,7 +135,7 @@ class TorchPreflopEQRLeafEvaluator(BaseLeafEvaluator):
         self.epsilon = float(epsilon)
 
     def evaluate_postflop_leaf(self, active_players, reaches, pot_bb, contributions,
-                               stacks_rem, payoff_matrix):
+                               stacks_rem, payoff_matrix, aggressor=None):
         torch = self.torch
         reach = torch.as_tensor(reaches, dtype=torch.float32, device=self.device)
         bounty = torch.as_tensor(payoff_matrix, dtype=torch.float32, device=self.device)
@@ -163,7 +163,7 @@ class TorchPreflopEQRLeafEvaluator(BaseLeafEvaluator):
         for p in active:
             equity = (pair_equities[p][0] if len(active) == 2
                       else scores[p] / normalizer)
-            role = "MULTIWAY_3WAY" if len(active) == 3 else "IP_CALLER"
+            role = _eqr_role(p, [q for q in active if q != p], active, aggressor)
             ev = float(pot_bb) * torch.clamp(equity * EQR[role], min=0.0, max=1.0)
             spr = max((float(stacks_rem[q]) for q in active if q != p), default=0.0) / max(float(pot_bb), self.epsilon)
             stackoff = min(1.0, max(0.0, 1.0 / (1.0 + spr)))
@@ -172,3 +172,12 @@ class TorchPreflopEQRLeafEvaluator(BaseLeafEvaluator):
                     ev = ev + bounty[p, q] * stackoff / (len(active) - 1)
             out[p] = ev - invested[p]
         return out
+
+
+def _eqr_role(player: int, opponents: list[int], active: tuple[int, ...], aggressor: int | None) -> str:
+    if len(active) == 3:
+        return "MULTIWAY_3WAY"
+    in_position = player < opponents[0]
+    if aggressor == player:
+        return "IP_AGGRESSOR" if in_position else "OOP_AGGRESSOR"
+    return "IP_CALLER" if in_position else "OOP_CALLER"

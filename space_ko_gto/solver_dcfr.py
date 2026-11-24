@@ -144,6 +144,7 @@ class MCCFRSolver:
                 contributions=state.contributions,
                 stacks_rem=state.stacks_rem,
                 payoff_matrix=self.payoffs,
+                aggressor=state.last_aggressor,
             )
             result = np.zeros(3, dtype=np.float32)
             result[[p for p in range(3) if p not in state.active]] = -np.asarray(state.contributions, dtype=np.float32)[[p for p in range(3) if p not in state.active]]

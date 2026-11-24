@@ -15,18 +15,20 @@ def icm_equities(stacks: list[float] | tuple[float, ...], payouts: list[float] |
     if s.sum() <= 0:
         raise ValueError("At least one stack must be positive")
     result = np.zeros(3, dtype=np.float64)
-    total = float(s.sum())
-    for order in permutations(range(3)):
+    alive = tuple(int(player) for player in np.flatnonzero(s > 0))
+    eliminated = tuple(int(player) for player in np.flatnonzero(s == 0))
+    for order in permutations(alive):
         probability = 1.0
-        remaining = total
+        remaining = float(s.sum())
         for player in order:
-            if remaining <= 0:
-                probability = 0.0
-                break
             probability *= s[player] / remaining
             remaining -= s[player]
         for place, player in enumerate(order):
             result[player] += probability * p[place]
+    # Zero-stack players have already been eliminated; assign the remaining
+    # fixed finishing places in stable player-index order.
+    for offset, player in enumerate(eliminated):
+        result[player] = p[len(alive) + offset]
     return result
 
 

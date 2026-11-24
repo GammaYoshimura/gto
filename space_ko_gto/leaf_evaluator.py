@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 import numpy as np
 
@@ -18,8 +19,8 @@ EQR = {
 class BaseLeafEvaluator(ABC):
     @abstractmethod
     def evaluate_postflop_leaf(self, active_players, reaches, pot_bb, contributions,
-                               stacks_rem, payoff_matrix) -> np.ndarray:
-        """Return net EVs with shape (3,1326), including already-invested chips."""
+                               stacks_rem, payoff_matrix) -> Any:
+        """Return net EVs shaped (3,1326), as NumPy or a device tensor."""
 
 
 class PreflopEQRLeafEvaluator(BaseLeafEvaluator):

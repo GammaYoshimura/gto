@@ -88,7 +88,7 @@ class MCCFRSolver:
         if not callable(getattr(self.leaf_evaluator, "checkpoint_fingerprint", None)):
             raise TypeError("leaf_evaluator must implement checkpoint_fingerprint()")
         self._checkpoint_config = {
-            "solver": "mccfr-v4",
+            "solver": "mccfr-v5",
             "stacks": list(self.stacks),
             "equity_sha256": hashlib.sha256(self.equity.tobytes()).hexdigest(),
             "payoff_sha256": hashlib.sha256(self.payoffs.tobytes()).hexdigest(),

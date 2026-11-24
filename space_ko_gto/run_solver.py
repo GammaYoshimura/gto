@@ -43,7 +43,7 @@ def run(equity_path: Path, db_path: Path, stacks, tokens, payouts,
         "payoff_to_bb": float(payoff_scale),
         "seed_initial": int(seed),
         "equity_matrix_sha256": hashlib.sha256(equity.tobytes()).hexdigest(),
-        "solver": "mccfr-v4",
+        "solver": "mccfr-v5",
     })
     solver = MCCFRSolver(stacks, equity, payoff, seed=seed, payoff_scale=payoff_scale)
     checkpoint = exporter.load_checkpoint(state_id) if resume else None

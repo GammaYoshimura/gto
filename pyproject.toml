@@ -16,6 +16,7 @@ gpu = ["torch>=2.1"]
 [project.scripts]
 space-ko-build-equity = "space_ko_gto.equity_builder:main"
 space-ko-solve = "space_ko_gto.run_solver:main"
+space-ko-batch = "space_ko_gto.run_batch:main"
 space-ko-verify-db = "space_ko_gto.verify_db:main"
 
 [tool.setuptools.packages.find]

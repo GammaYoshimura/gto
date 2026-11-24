@@ -26,6 +26,7 @@ def verify_database(db_path: str, tolerance: float = 0.01) -> list[str]:
         return [f"SQLite schema or read error: {exc}"]
 
     node_counts = {}
+    node_action_counts = {}
     for state_id, node_path, actions_json, strategy_blob, ev_blob in rows:
         label = f"{state_id}/{node_path}"
         node_counts[state_id] = node_counts.get(state_id, 0) + 1
@@ -40,6 +41,7 @@ def verify_database(db_path: str, tolerance: float = 0.01) -> list[str]:
         if len(set(actions)) != len(actions):
             issues.append(f"{label}: duplicate action labels")
             continue
+        node_action_counts[(state_id, node_path)] = len(actions)
         shape = (1326, len(actions))
         expected_bytes = int(np.prod(shape)) * np.dtype(np.float16).itemsize
         if len(strategy_blob) != expected_bytes or len(ev_blob) != expected_bytes:
@@ -77,6 +79,30 @@ def verify_database(db_path: str, tolerance: float = 0.01) -> list[str]:
                              "strategy_sums", "ev_sums", "row_visits"):
                 if required not in checkpoint:
                     issues.append(f"{label}: checkpoint missing {required}")
+            row_keys = set()
+            for table_name in ("regrets", "strategy_sums", "ev_sums"):
+                for row in checkpoint.get(table_name, []):
+                    if not isinstance(row, list) or len(row) != 3:
+                        issues.append(f"{label}: malformed row in {table_name}")
+                        continue
+                    key, combo, values = row
+                    node_actions = node_action_counts.get((state_id, key))
+                    if not isinstance(combo, int) or not 0 <= combo < 1326:
+                        issues.append(f"{label}: invalid combo index in {table_name}")
+                    if node_actions is not None and (not isinstance(values, list) or len(values) != node_actions):
+                        issues.append(f"{label}: action dimension mismatch in {table_name} at {key}")
+                    if not isinstance(values, list) or not np.isfinite(np.asarray(values, dtype=np.float64)).all():
+                        issues.append(f"{label}: non-finite or invalid values in {table_name} at {key}")
+                    row_keys.add((table_name, key, combo))
+            for key, combo, last_t in checkpoint.get("regret_last_t", []):
+                if not isinstance(combo, int) or not 0 <= combo < 1326 or not isinstance(last_t, int) or not 0 <= last_t <= iteration:
+                    issues.append(f"{label}: invalid regret discount timestamp at {key}")
+                if ("regrets", key, combo) not in row_keys:
+                    issues.append(f"{label}: discount timestamp has no regret row at {key}")
+            for key, combo, visits in checkpoint.get("row_visits", []):
+                if (not isinstance(combo, int) or not 0 <= combo < 1326 or
+                        not math.isfinite(float(visits)) or float(visits) < 0):
+                    issues.append(f"{label}: invalid row visit count at {key}")
         except (ValueError, zlib.error, json.JSONDecodeError, AttributeError, TypeError) as exc:
             issues.append(f"{label}: invalid compressed checkpoint ({exc})")
 
